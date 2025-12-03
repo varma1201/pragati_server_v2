@@ -1,0 +1,4 @@
+FLASK_APP=app:create_app
+FLASK_ENV=development
+PYTHONPATH=.
+FLASK_RUN_PORT=8000

@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Validation Report: {{ title }}</title>
+    <style>
+      /* CSS Variables matching React UI */
+      :root {
+        --primary: 142 71% 45%; /* #34a853 */
+        --primary-foreground: 0 0% 100%;
+        --destructive: 0 84% 60%; /* #ea4335 */
+        --destructive-foreground: 0 0% 100%;
+        --warning: 45 97% 50%; /* #fbbc05 */
+        --warning-foreground: 0 0% 0%;
+        --muted: 210 40% 96%;
+        --muted-foreground: 215 16% 47%;
+        --card: 0 0% 100%;
+        --card-foreground: 222 47% 11%;
+        --border: 214 32% 91%;
+        --background: 0 0% 100%;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        background-color: hsl(var(--background));
+        color: hsl(var(--card-foreground));
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      .page {
+        width: 100%;
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+
+      .card {
+        background-color: hsl(var(--card));
+        border: 1px solid hsl(var(--border));
+        border-radius: 12px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        overflow: hidden;
+      }
+
+      .card-header {
+        padding: 24px;
+        border-bottom: 1px solid hsl(var(--border));
+      }
+
+      .card-content {
+        padding: 24px;
+      }
+
+      .flex {
+        display: flex;
+      }
+
+      .items-center {
+        align-items: center;
+      }
+
+      .justify-between {
+        justify-content: space-between;
+      }
+
+      .gap-2 {
+        gap: 8px;
+      }
+
+      .gap-4 {
+        gap: 16px;
+      }
+
+      .gap-6 {
+        gap: 24px;
+      }
+
+      .grid {
+        display: grid;
+      }
+
+      .grid-cols-1 {
+        grid-template-columns: repeat(1, minmax(0, 1fr));
+      }
+
+      .lg\\\\:grid-cols-\[1fr_auto_1fr\] {
+        grid-template-columns: 1fr auto 1fr;
+      }
+
+      .space-y-4 > * + * {
+        margin-top: 16px;
+      }
+
+      .space-y-6 > * + * {
+        margin-top: 24px;
+      }
+
+      .text-xl {
+        font-size: 20px;
+        line-height: 28px;
+      }
+
+      .text-2xl {
+        font-size: 24px;
+        line-height: 32px;
+      }
+
+      .font-semibold {
+        font-weight: 600;
+      }
+
+      .font-bold {
+        font-weight: 700;
+      }
+
+      .text-muted-foreground {
+        color: hsl(var(--muted-foreground));
+      }
+
+      .text-green-600 {
+        color: hsl(142 71% 45%);
+      }
+
+      .text-red-600 {
+        color: hsl(0 84% 60%);
+      }
+
+      .text-orange-600 {
+        color: hsl(45 97% 50%);
+      }
+
+      .border-l-4 {
+        border-left-width: 4px;
+      }
+
+      .border-primary {
+        border-color: hsl(var(--primary));
+      }
+
+      .bg-muted\\\\/50 {
+        background-color: hsl(var(--muted) / 0.5);
+      }
+
+      .bg-primary\\\\/5 {
+        background-color: hsl(var(--primary) / 0.05);
+      }
+
+      .p-4 {
+        padding: 16px;
+      }
+
+      .p-6 {
+        padding: 24px;
+      }
+
+      .p-3 {
+        padding: 12px;
+      }
+
+      .rounded-md {
+        border-radius: 6px;
+      }
+
+      .rounded-lg {
+        border-radius: 8px;
+      }
+
+      .rounded-full {
+        border-radius: 9999px;
+      }
+
+      .h-\\\\[350px\\\\] {
+        height: 350px;
+      }
+
+      .w-full {
+        width: 100%;
+      }
+
+      .w-32 {
+        width: 128px;
+      }
+
+      .h-24 {
+        height: 96px;
+      }
+
+      .h-16 {
+        height: 64px;
+      }
+
+      .h-4 {
+        height: 16px;
+      }
+
+      .w-4 {
+        width: 16px;
+      }
+
+      .h-6 {
+        height: 24px;
+      }
+
+      .w-6 {
+        width: 24px;
+      }
+
+      .mx-auto {
+        margin-left: auto;
+        margin-right: auto;
+      }
+
+      .mt-2 {
+        margin-top: 8px;
+      }
+
+      .mt-4 {
+        margin-top: 16px;
+      }
+
+      .mb-2 {
+        margin-bottom: 8px;
+      }
+
+      .mb-3 {
+        margin-bottom: 12px;
+      }
+
+      .pt-2 {
+        padding-top: 8px;
+      }
+
+      .pt-4 {
+        padding-top: 16px;
+      }
+
+      .pb-4 {
+        padding-bottom: 16px;
+      }
+
+      .pr-2 {
+        padding-right: 8px;
+      }
+
+      .divide-y > * + * {
+        border-top: 1px solid hsl(var(--border));
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border-width: 0;
+      }
+
+      /* Badge styles */
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 9999px;
+        border: 1px solid transparent;
+        padding: 0.375rem 0.75rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+      }
+
+      .badge.status-approved {
+        background-color: hsl(142 71% 90%);
+        color: hsl(142 71% 25%);
+      }
+
+      .badge.status-rejected {
+        background-color: hsl(0 84% 90%);
+        color: hsl(0 84% 35%);
+      }
+
+      .badge.status-validation {
+        background-color: hsl(45 97% 90%);
+        color: hsl(45 97% 30%);
+      }
+
+      /* Spider chart container */
+      .spider-chart-wrapper {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 350px;
+      }
+
+      .spider-chart-img {
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+      }
+
+      /* Score circle */
+      .score-display {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        text-align: center;
+        width: 128px;
+      }
+
+      .score-circle {
+        position: relative;
+        width: 96px;
+        height: 96px;
+      }
+
+      .score-circle svg {
+        width: 100%;
+        height: 100%;
+      }
+
+      .score-value {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        font-weight: 700;
+      }
+
+      .score-status {
+        font-weight: 600;
+      }
+
+      /* Highlights list */
+      .highlights-list {
+        list-style: none;
+      }
+
+      .highlight-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 12px;
+        border-radius: 6px;
+        transition: background-color 0.2s;
+      }
+
+      .highlight-item:hover {
+        background-color: hsl(var(--muted) / 0.5);
+      }
+
+      .highlight-name {
+        color: hsl(var(--muted-foreground));
+      }
+
+      .highlight-score {
+        font-weight: 700;
+      }
+
+      /* Action points */
+      .action-point-item {
+        padding: 12px;
+        border-radius: 6px;
+        border-left: 4px solid hsl(var(--primary));
+        background-color: hsl(var(--muted) / 0.5);
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+
+      /* Detailed assessment */
+      .cluster-section {
+        border: 1px solid hsl(var(--border));
+        border-radius: 8px;
+        margin-bottom: 16px;
+        padding: 16px;
+      }
+
+      .cluster-title {
+        font-size: 18px;
+        font-weight: 700;
+        color: hsl(142 71% 45%);
+        margin-bottom: 16px;
+      }
+
+      .param-section {
+        border-top: 1px solid hsl(var(--muted));
+        padding: 16px 0;
+      }
+
+      .param-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-weight: 600;
+        margin-bottom: 12px;
+      }
+
+      .sub-param-grid {
+        display: grid;
+        grid-template-columns: 1fr auto 2fr 2fr;
+        gap: 16px;
+        align-items: center;
+        padding: 12px 0;
+        border-top: 1px solid hsl(var(--muted));
+      }
+
+      .sub-param-name {
+        font-weight: 600;
+      }
+
+      .sub-param-score {
+        width: 64px;
+        height: 64px;
+        position: relative;
+      }
+
+      .sub-param-score svg {
+        width: 100%;
+        height: 100%;
+      }
+
+      .sub-param-score-value {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      .feedback-strength,
+      .feedback-improvement {
+        font-size: 13px;
+        color: hsl(var(--muted-foreground));
+        margin: 0;
+      }
+
+      .feedback-strength::before {
+        content: "👍";
+        margin-right: 8px;
+      }
+
+      .feedback-improvement::before {
+        content: "💡";
+        margin-right: 8px;
+      }
+
+      /* Separator */
+      .separator {
+        height: 1px;
+        width: 100%;
+        background-color: hsl(var(--border));
+        margin: 24px 0;
+      }
+
+      .separator-vertical {
+        width: 1px;
+        height: auto;
+        background-color: hsl(var(--border));
+      }
+
+      /* Footer */
+      .footer {
+        margin-top: 40px;
+        text-align: center;
+        font-size: 12px;
+        color: hsl(var(--muted-foreground));
+      }
+
+      @media (min-width: 768px) {
+        .md\\\\:grid-cols-2 {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <!-- Header Card -->
+      <div class="card">
+        <div class="card-header">
+          <div class="flex justify-between items-start gap-6">
+            <div>
+              <h1 class="text-2xl font-bold" style="color: hsl(142 71% 45%)">
+                {{ title }}
+              </h1>
+              <div
+                class="flex items-center flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground pt-2"
+              >
+                <span>ID: {{ report_id }}</span>
+                <span>Generated: {{ generated_date }}</span>
+                <span>
+                  Status:
+                  <span
+                    class="badge {% if validation_outcome == 'Approved' %}status-approved{% elif validation_outcome == 'Rejected' %}status-rejected{% else %}status-validation{% endif %} ml-2"
+                  >
+                    {{ validation_outcome }}
+                  </span>
+                </span>
+              </div>
+            </div>
+            <div class="score-display">
+              <div class="score-circle">
+                <svg viewBox="0 0 50 50">
+                  <circle
+                    cx="25"
+                    cy="25"
+                    r="20"
+                    stroke="hsl(var(--muted))"
+                    stroke-width="4"
+                    fill="transparent"
+                  />
+                  <circle
+                    cx="25"
+                    cy="25"
+                    r="20"
+                    stroke="currentColor"
+                    stroke-width="4"
+                    fill="transparent"
+                    stroke-dasharray="125.6"
+                    stroke-dashoffset="{{ 125.6 - (overall_score / 100) * 125.6 }}"
+                    transform="rotate(-90 25 25)"
+                    class="{% if overall_score >= 80 %}text-green-600{% elif overall_score >= 50 %}text-orange-600{% else %}text-red-600{% endif %}"
+                  />
+                </svg>
+                <span
+                  class="score-value {% if overall_score >= 80 %}text-green-600{% elif overall_score >= 50 %}text-orange-600{% else %}text-red-600{% endif %}"
+                >
+                  {{ overall_score|round|int }}
+                </span>
+              </div>
+              <span
+                class="score-status {% if overall_score >= 80 %}text-green-600{% elif overall_score >= 50 %}text-orange-600{% else %}text-red-600{% endif %}"
+              >
+                {{ validation_outcome }}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card-content space-y-6">
+          <!-- Spider Chart and Highlights -->
+          <div class="grid grid-cols-1 lg:grid-cols-[1fr_auto_1fr] gap-6">
+            <!-- Spider Chart -->
+            <div class="space-y-4">
+              <h3 class="text-xl font-semibold">Cluster Performance</h3>
+              <p class="text-sm text-muted-foreground">
+                Average scores across the main evaluation clusters.
+              </p>
+              <div class="spider-chart-wrapper">
+                {% if spider_chart %}
+                <img
+                  src="{{ spider_chart }}"
+                  alt="Cluster Performance Spider Chart"
+                  class="spider-chart-img"
+                />
+                {% else %}
+                <p class="text-muted-foreground">
+                  Chart could not be generated.
+                </p>
+                {% endif %}
+              </div>
+            </div>
+
+            <div class="separator-vertical"></div>
+
+            <!-- Highlights -->
+            <div class="space-y-4">
+              <h3 class="text-xl font-semibold">Highlights & Lowlights</h3>
+              <p class="text-sm text-muted-foreground">
+                Top and bottom performing sub-parameters.
+              </p>
+
+              <div class="space-y-4">
+                <div>
+                  <h4
+                    class="font-semibold text-green-600 flex items-center gap-2"
+                  >
+                    <svg
+                      class="h-4 w-4"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                    >
+                      <path d="M7 14l5-5 5 5z" />
+                    </svg>
+                    Top Performers
+                  </h4>
+                  <ul class="highlights-list mt-2">
+                    {% for item in top_performers %}
+                    <li class="highlight-item">
+                      <span class="highlight-name">{{ item.name }}</span>
+                      <span class="highlight-score text-green-600"
+                        >{{ item.score }}</span
+                      >
+                    </li>
+                    {% endfor %} {% if not top_performers %}
+                    <li class="text-sm text-muted-foreground">
+                      No top performers found
+                    </li>
+                    {% endfor %}
+                  </ul>
+                </div>
+
+                <div class="separator"></div>
+
+                <div>
+                  <h4
+                    class="font-semibold text-red-600 flex items-center gap-2"
+                  >
+                    <svg
+                      class="h-4 w-4"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                    >
+                      <path d="M7 10l5 5 5-5z" />
+                    </svg>
+                    Areas for Improvement
+                  </h4>
+                  <ul class="highlights-list mt-2">
+                    {% for item in bottom_performers %}
+                    <li class="highlight-item">
+                      <span class="highlight-name">{{ item.name }}</span>
+                      <span class="highlight-score text-red-600"
+                        >{{ item.score }}</span
+                      >
+                    </li>
+                    {% endfor %} {% if not bottom_performers %}
+                    <li class="text-sm text-muted-foreground">
+                      No low performers found
+                    </li>
+                    {% endfor %}
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="separator"></div>
+
+          <!-- Action Points -->
+          <div class="space-y-4">
+            <h3 class="text-xl font-semibold">Next Steps</h3>
+            <p class="text-sm text-muted-foreground">
+              Actionable steps to improve your idea based on the evaluation.
+            </p>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div class="flex flex-col gap-2">
+                {% for point in bottom_performers %} {% if loop.index <= 3 %}
+                <div class="action-point-item">
+                  <p class="font-semibold">Improve: {{ point.name }}</p>
+                </div>
+                {% endif %} {% endfor %} {% if not bottom_performers %}
+                <div class="p-3 rounded-md bg-muted/50">
+                  <p class="text-sm text-muted-foreground">
+                    No specific action items identified
+                  </p>
+                </div>
+                {% endif %}
+              </div>
+              <div class="bg-muted/50 p-4 rounded-lg">
+                <h4 class="font-semibold mb-3">Recommended Actions:</h4>
+                <div class="space-y-3">
+                  <li
+                    class="flex items-start gap-3 text-sm text-muted-foreground"
+                  >
+                    <svg
+                      class="h-4 w-4 text-green-600 mt-0.5 shrink-0"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                    >
+                      <path d="M9 12l2 2 4-4z" />
+                    </svg>
+                    <span>Review feedback for selected parameters</span>
+                  </li>
+                  <li
+                    class="flex items-start gap-3 text-sm text-muted-foreground"
+                  >
+                    <svg
+                      class="h-4 w-4 text-green-600 mt-0.5 shrink-0"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                    >
+                      <path d="M9 12l2 2 4-4z" />
+                    </svg>
+                    <span>Brainstorm improvement strategies</span>
+                  </li>
+                  <li
+                    class="flex items-start gap-3 text-sm text-muted-foreground"
+                  >
+                    <svg
+                      class="h-4 w-4 text-green-600 mt-0.5 shrink-0"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                    >
+                      <path d="M9 12l2 2 4-4z" />
+                    </svg>
+                    <span>Update pitch deck accordingly</span>
+                  </li>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="separator"></div>
+
+          <!-- Detailed Assessment (No Accordion) -->
+          <div class="space-y-4">
+            <h3 class="text-xl font-semibold">Detailed Viability Assessment</h3>
+            <p class="text-sm text-muted-foreground">
+              Comprehensive evaluation of all parameters across multiple
+              clusters
+            </p>
+
+            {% for cluster_name, params in detailed_assessment.items() %}
+            <div class="cluster-section">
+              <h3 class="cluster-title">{{ cluster_name }}</h3>
+              {% for param_name, sub_params in params.items() %} {% if
+              sub_params is mapping %} {% set scores = [] %} {% for sub in
+              sub_params.values() %} {% if sub.assignedScore is defined %} {% do
+              scores.append(sub.assignedScore) %} {% endif %} {% endfor %} {%
+              set category_average = (scores | sum / scores.length) | round if
+              scores else 0 %}
+
+              <div class="param-section">
+                <div class="param-header">
+                  <span class="font-semibold">{{ param_name }}</span>
+                  <span
+                    class="{% if category_average >= 80 %}text-green-600{% elif category_average >= 50 %}text-orange-600{% else %}text-red-600{% endif %} font-bold text-base"
+                  >
+                    {{ category_average|int }}
+                  </span>
+                </div>
+                <div class="divide-y">
+                  {% for sub_param_name, sub_param_data in sub_params.items() %}
+                  {% if sub_param_data.assignedScore is defined %} {% set score
+                  = sub_param_data.assignedScore %} {% set circumference = 2 *
+                  3.14159 * 18 %} {% set dashoffset = circumference - (score /
+                  100) * circumference %}
+
+                  <div class="sub-param-grid">
+                    <div class="sub-param-name">{{ sub_param_name }}</div>
+                    <div class="sub-param-score">
+                      <svg viewBox="0 0 40 40">
+                        <circle
+                          cx="20"
+                          cy="20"
+                          r="18"
+                          stroke="hsl(var(--muted))"
+                          stroke-width="3"
+                          fill="transparent"
+                        />
+                        <circle
+                          cx="20"
+                          cy="20"
+                          r="18"
+                          stroke="currentColor"
+                          stroke-width="3"
+                          fill="transparent"
+                          stroke-dasharray="{{ circumference }}"
+                          stroke-dashoffset="{{ dashoffset }}"
+                          transform="rotate(-90 20 20)"
+                          class="{% if score >= 80 %}text-green-600{% elif score >= 50 %}text-orange-600{% else %}text-red-600{% endif %}"
+                        />
+                      </svg>
+                      <span
+                        class="sub-param-score-value {% if score >= 80 %}text-green-600{% elif score >= 50 %}text-orange-600{% else %}text-red-600{% endif %}"
+                      >
+                        {{ score }}
+                      </span>
+                    </div>
+                    <div>
+                      <p class="feedback-strength">
+                        <strong>Strength:</strong> {{
+                        sub_param_data.whatWentWell or "No data" }}
+                      </p>
+                    </div>
+                    <div>
+                      <p class="feedback-improvement">
+                        <strong>Improvement:</strong> {{
+                        sub_param_data.whatCanBeImproved or "No data" }}
+                      </p>
+                    </div>
+                  </div>
+                  {% endif %} {% endfor %}
+                </div>
+              </div>
+              {% endif %} {% endfor %}
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="footer">
+        <p>Generated by Pragati - Confidential & Proprietary</p>
+        <p>Report ID: {{ report_id }} | Generated: {{ generated_date }}</p>
+      </div>
+    </div>
+  </body>
+</html>
