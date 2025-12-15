@@ -27,7 +27,7 @@ def adjust_balance(uid, delta):
 # 1. INNOVATOR → TTC: Request credits
 # -------------------------------------------------------------------------
 @credits_bp.route('/request-from-ttc', methods=['POST'])
-@requires_role(['innovator'])
+@requires_role(['innovator', 'individual_innovator'])
 def innovator_credit_request():
     """Innovator requests credits from their TTC coordinator"""
     body = request.get_json(force=True)
@@ -37,15 +37,38 @@ def innovator_credit_request():
     if amount <= 0 or not reason:
         return jsonify({"error": "amount > 0 and reason required"}), 400
     
+    # ✅ FIX: Normalize user_id to ObjectId
+    user_id = request.user_id
+    if isinstance(user_id, str):
+        try:
+            user_id = ObjectId(user_id)
+        except Exception:
+            return jsonify({"error": "Invalid user ID format"}), 400
+    
+    print(f"🔍 Looking up innovator: {user_id} (type: {type(user_id)})")
+    
     # Get innovator details
     innovator = users_coll.find_one(
-        {"_id": request.user_id},
+        {"_id": user_id},
         {"ttcCoordinatorId": 1, "name": 1}
     )
-    ttc_id = innovator.get('ttcCoordinatorId')
     
+    if not innovator:
+        print(f"❌ Innovator not found: {user_id}")
+        return jsonify({"error": "User not found in database"}), 404
+    
+    print(f"✅ Innovator found: {innovator.get('name')}")
+    
+    ttc_id = innovator.get('ttcCoordinatorId')
     if not ttc_id:
         return jsonify({"error": "TTC coordinator not linked"}), 400
+    
+    # ✅ FIX: Ensure ttc_id is also ObjectId
+    if isinstance(ttc_id, str):
+        try:
+            ttc_id = ObjectId(ttc_id)
+        except Exception:
+            return jsonify({"error": "Invalid TTC ID format"}), 400
     
     # Create request
     rid = ObjectId()
@@ -54,8 +77,8 @@ def innovator_credit_request():
     
     credit_requests_coll.insert_one({
         "_id": rid,
-        "from": request.user_id,
-        "to": ttc_id,
+        "from": user_id,  # ✅ Use normalized ObjectId
+        "to": ttc_id,      # ✅ Use normalized ObjectId
         "amount": amount,
         "reason": reason,
         "status": "pending",
@@ -64,17 +87,20 @@ def innovator_credit_request():
     })
     
     # ✅ NOTIFY TTC about credit request
-    NotificationService.create_notification(
-        ttc_id,
-        'CREDIT_REQUEST_RECEIVED_TTC',
-        {
-            'innovatorName': innovator.get('name', 'Innovator'),
-            'amount': amount
-        }
-    )
+    try:
+        NotificationService.create_notification(
+            str(ttc_id),  # Convert to string for notification service
+            'CREDIT_REQUEST_RECEIVED_TTC',
+            {
+                'innovatorName': innovator.get('name', 'Innovator'),
+                'amount': amount
+            }
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to send notification: {e}")
     
     return jsonify({
-        "requestId": rid,
+        "requestId": str(rid),
         "message": "Request sent to TTC",
         "success": True
     }), 201
@@ -90,9 +116,19 @@ def ttc_incoming_requests():
     app_id = current_app.config.get('APP_ID', 'pragati-app')
     credit_requests_coll = db[f"{app_id}_credit_requests_internal"]
     
+    # ✅ FIX: Convert user_id to ObjectId
+    user_id = request.user_id
+    if isinstance(user_id, str):
+        try:
+            user_id = ObjectId(user_id)
+        except Exception:
+            return jsonify({"error": "Invalid user ID format"}), 400
+    
+    print(f"🔍 Looking for credit requests to: {user_id} (type: {type(user_id)})")
+    
     cursor = credit_requests_coll.find(
         {
-            "to": request.user_id,
+            "to": user_id,  # ✅ Now using ObjectId
             "level": "innovator-ttc"
         },
         {
@@ -105,13 +141,23 @@ def ttc_incoming_requests():
     # Enrich with innovator details
     enriched = []
     for doc in cursor:
+        print(f"   Found request: {doc.get('_id')} from {doc.get('from')}")
+        
         innov = users_coll.find_one(
             {"_id": doc['from']},
             {"name": 1, "email": 1}
         )
-        doc['innovatorName'] = innov.get('name')
-        doc['innovatorEmail'] = innov.get('email')
-        enriched.append(doc)
+        
+        if innov:
+            doc['innovatorName'] = innov.get('name', 'Unknown')
+            doc['innovatorEmail'] = innov.get('email', '')
+        else:
+            doc['innovatorName'] = 'Unknown'
+            doc['innovatorEmail'] = ''
+        
+        enriched.append(clean_doc(doc))  # ✅ Clean ObjectIds to strings
+    
+    print(f"✅ Returning {len(enriched)} requests")
     
     return jsonify({"success": True, "data": enriched}), 200
 
@@ -123,12 +169,21 @@ def ttc_incoming_requests():
 @requires_role(['ttc_coordinator'])
 def ttc_decide_credit_request(rid):
     """TTC coordinator approves or rejects innovator credit request"""
+    from pymongo import ReturnDocument
+    
     try:
-        if isinstance(rid, str):
-            rid = ObjectId(rid)
+        rid = ObjectId(rid) if isinstance(rid, str) else rid
     except:
         return jsonify({"error": "Invalid request ID"}), 400
-
+    
+    # ✅ FIX: Convert user_id to ObjectId
+    ttc_id = request.user_id
+    if isinstance(ttc_id, str):
+        try:
+            ttc_id = ObjectId(ttc_id)
+        except:
+            return jsonify({"error": "Invalid user ID"}), 400
+    
     body = request.get_json(force=True)
     decision = body.get('decision')
     reject_reason = body.get('reason', 'Not specified')
@@ -142,14 +197,13 @@ def ttc_decide_credit_request(rid):
     # Find request
     req_doc = req_coll.find_one({
         "_id": rid,
-        "to": request.user_id,
+        "to": ttc_id,
         "status": "pending"
     })
     
     if not req_doc:
         return jsonify({"error": "Request not found or already handled"}), 404
     
-    ttc_id = request.user_id
     innov_id = req_doc['from']
     amount = req_doc['amount']
     
@@ -168,14 +222,17 @@ def ttc_decide_credit_request(rid):
         )
         
         # ✅ NOTIFY INNOVATOR about rejection
-        NotificationService.create_notification(
-            innov_id,
-            'CREDIT_REQUEST_REJECTED',
-            {
-                'amount': amount,
-                'reason': reject_reason
-            }
-        )
+        try:
+            NotificationService.create_notification(
+                str(innov_id),
+                'CREDIT_REQUEST_REJECTED',
+                {
+                    'amount': amount,
+                    'reason': reject_reason
+                }
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to notify innovator: {e}")
         
         return jsonify({"success": True, "message": "Request rejected"}), 200
     
@@ -217,11 +274,14 @@ def ttc_decide_credit_request(rid):
     )
     
     # ✅ NOTIFY INNOVATOR about approval
-    NotificationService.create_notification(
-        innov_id,
-        'CREDIT_REQUEST_APPROVED',
-        {'amount': amount}
-    )
+    try:
+        NotificationService.create_notification(
+            str(innov_id),
+            'CREDIT_REQUEST_APPROVED',
+            {'amount': amount}
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to notify innovator: {e}")
     
     return jsonify({"success": True, "message": "Request approved"}), 200
 
@@ -289,33 +349,67 @@ def ttc_request_from_college():
 @requires_role(['college_admin'])
 def college_incoming_requests():
     """List all TTC → College credit requests"""
-    app_id = current_app.config.get('APP_ID', 'pragati-app')
-    credit_requests_coll = db[f"{app_id}_credit_requests_internal"]
     
-    # Get college admin's college ID
-    admin = users_coll.find_one({"_id": request.user_id}, {"_id": 1})
+    # ✅ FIX: Convert admin_id to ObjectId
+    admin_id = request.user_id
+    if isinstance(admin_id, str):
+        try:
+            admin_id = ObjectId(admin_id)
+        except:
+            return jsonify({"error": "Invalid user ID"}), 400
+    
+    admin_id_str = str(admin_id)
+    
+    print(f"🔍 Looking for credit requests to college admin: {admin_id_str}")
+    
+    # ✅ Query from the COORDINATOR credit_requests collection
+    from app.database.mongo import credit_requests_coll
     
     cursor = credit_requests_coll.find(
         {
-            "to": request.user_id,
-            "level": "ttc-college"
+            "collegeId": admin_id_str,  # ✅ Match by collegeId (string)
+            "requesterType": "ttc_coordinator",  # Only TTC requests
+            # No need for "level" filter - this is a different collection
         },
         {
-            "_id": 1, "from": 1, "amount": 1,
-            "reason": 1, "status": 1, "createdAt": 1, "decidedAt": 1
+            "_id": 1, "requesterId": 1, "requesterName": 1, "requesterEmail": 1,
+            "amount": 1, "purpose": 1, "status": 1, 
+            "createdAt": 1, "updatedAt": 1
         }
     ).sort("createdAt", -1)
     
     # Enrich with TTC details
     enriched = []
     for doc in cursor:
+        print(f"   Found request: {doc.get('_id')} from {doc.get('requesterId')}")
+        
+        # Get TTC coordinator details
+        ttc_id = doc.get('requesterId')
+        if isinstance(ttc_id, str):
+            ttc_id = ObjectId(ttc_id)
+        
         ttc = users_coll.find_one(
-            {"_id": doc['from']},
+            {"_id": ttc_id},
             {"name": 1, "email": 1}
         )
-        doc['ttcName'] = ttc.get('name') if ttc else 'Unknown'
-        doc['ttcEmail'] = ttc.get('email') if ttc else ''
-        enriched.append(doc)
+        
+        # Format response
+        enriched_doc = {
+            "_id": str(doc.get('_id')),
+            "requestId": str(doc.get('_id')),
+            "ttcId": str(doc.get('requesterId')),
+            "ttcName": doc.get('requesterName') or (ttc.get('name') if ttc else 'Unknown'),
+            "ttcEmail": doc.get('requesterEmail') or (ttc.get('email') if ttc else ''),
+            "amount": doc.get('amount'),
+            "purpose": doc.get('purpose', ''),  # purpose instead of reason
+            "status": doc.get('status'),
+            "createdAt": doc.get('createdAt').isoformat() if doc.get('createdAt') else None,
+            "decidedAt": doc.get('updatedAt').isoformat() if doc.get('status') != 'pending' and doc.get('updatedAt') else None
+        }
+        
+        enriched.append(enriched_doc)
+    
+    print(f"✅ Returning {len(enriched)} requests")
     
     return jsonify({"success": True, "data": enriched}), 200
 
@@ -327,11 +421,19 @@ def college_incoming_requests():
 @requires_role(['college_admin'])
 def college_decide_ttc_request(rid):
     """College admin approves or rejects TTC credit request"""
+    from pymongo import UpdateOne
+    
     try:
-        if isinstance(rid, str):
-            rid = ObjectId(rid)
+        rid = ObjectId(rid) if isinstance(rid, str) else rid
     except:
         return jsonify({"error": "Invalid request ID"}), 400
+    
+    # ✅ Keep admin_id as the original string from JWT
+    admin_id = request.user_id
+    admin_id_str = str(admin_id)  # Ensure it's a string
+    
+    print(f"🔍 Admin ID type: {type(admin_id)}, value: {admin_id}")
+    print(f"🔍 Admin ID as string: {admin_id_str}")
 
     body = request.get_json(force=True)
     decision = body.get('decision')
@@ -340,53 +442,74 @@ def college_decide_ttc_request(rid):
     if decision not in ['approved', 'rejected']:
         return jsonify({"error": "Invalid decision"}), 400
     
-    app_id = current_app.config.get('APP_ID', 'pragati-app')
-    req_coll = db[f"{app_id}_credit_requests_internal"]
+    # ✅ Use coordinator's credit_requests_coll
+    from app.database.mongo import credit_requests_coll
     
-    req = req_coll.find_one({
+    print(f"🔍 Looking for request: {rid} for college: {admin_id_str}")
+    
+    # First, let's check what's actually in the DB
+    req_test = credit_requests_coll.find_one({"_id": rid})
+    if req_test:
+        print(f"📋 Request exists with collegeId: '{req_test.get('collegeId')}' (type: {type(req_test.get('collegeId'))})")
+        print(f"📋 Comparing with admin_id_str: '{admin_id_str}' (type: {type(admin_id_str)})")
+        print(f"📋 Match: {req_test.get('collegeId') == admin_id_str}")
+    
+    req = credit_requests_coll.find_one({
         "_id": rid,
-        "to": request.user_id,
-        "level": "ttc-college",
+        "collegeId": admin_id_str,  # ✅ String match
+        "requesterType": "ttc_coordinator",
         "status": "pending"
     })
     
     if not req:
-        return jsonify({"error": "Request not found"}), 404
+        print(f"❌ Request not found with query: _id={rid}, collegeId={admin_id_str}")
+        return jsonify({"error": "Request not found or already processed"}), 404
+    
+    print(f"✅ Found request: {req}")
     
     amount = req['amount']
-    ttc_id = req['from']
-    admin_id = request.user_id
+    ttc_id = req['requesterId']
+    
+    # Convert ttc_id to ObjectId for user operations
+    if isinstance(ttc_id, str):
+        ttc_id = ObjectId(ttc_id)
+    
+    # Convert admin_id to ObjectId for user operations
+    admin_id_obj = ObjectId(admin_id_str) if isinstance(admin_id, str) else admin_id
     
     # Handle rejection
     if decision == 'rejected':
-        req_coll.update_one(
+        credit_requests_coll.update_one(
             {"_id": rid},
             {
                 "$set": {
                     "status": "rejected",
-                    "decidedAt": datetime.now(timezone.utc),
-                    "decidedBy": admin_id,
+                    "updatedAt": datetime.now(timezone.utc),
+                    "decidedBy": admin_id_str,
                     "rejectionReason": reject_reason
                 }
             }
         )
         
         # ✅ NOTIFY TTC about rejection
-        NotificationService.create_notification(
-            ttc_id,
-            'CREDIT_REQUEST_REJECTED',
-            {
-                'amount': amount,
-                'reason': reject_reason
-            }
-        )
+        try:
+            NotificationService.create_notification(
+                str(ttc_id),
+                'CREDIT_REQUEST_REJECTED',
+                {
+                    'amount': amount,
+                    'reason': reject_reason
+                }
+            )
+        except Exception as e:
+            print(f"⚠️ Failed to notify TTC: {e}")
         
         return jsonify({"success": True, "message": "Request rejected"}), 200
     
     # Handle approval
     # 1. Verify admin has enough credits
     admin_doc = users_coll.find_one(
-        {"_id": admin_id},
+        {"_id": admin_id_obj},
         {"creditQuota": 1}
     )
     
@@ -396,7 +519,7 @@ def college_decide_ttc_request(rid):
     # 2. Atomic deduction from admin + addition to TTC
     res = users_coll.bulk_write([
         UpdateOne(
-            {"_id": admin_id, "creditQuota": {"$gte": amount}},
+            {"_id": admin_id_obj, "creditQuota": {"$gte": amount}},
             {"$inc": {"creditQuota": -amount}}
         ),
         UpdateOne(
@@ -409,23 +532,26 @@ def college_decide_ttc_request(rid):
         return jsonify({"error": "Failed to transfer credits"}), 500
     
     # 3. Mark request as approved
-    req_coll.update_one(
+    credit_requests_coll.update_one(
         {"_id": rid},
         {
             "$set": {
                 "status": "approved",
-                "decidedAt": datetime.now(timezone.utc),
-                "decidedBy": admin_id
+                "updatedAt": datetime.now(timezone.utc),
+                "decidedBy": admin_id_str
             }
         }
     )
     
     # ✅ NOTIFY TTC about approval
-    NotificationService.create_notification(
-        ttc_id,
-        'CREDIT_REQUEST_APPROVED',
-        {'amount': amount}
-    )
+    try:
+        NotificationService.create_notification(
+            str(ttc_id),
+            'CREDIT_REQUEST_APPROVED',
+            {'amount': amount}
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to notify TTC: {e}")
     
     return jsonify({"success": True, "message": "Request approved"}), 200
 
@@ -434,7 +560,7 @@ def college_decide_ttc_request(rid):
 # 7. GET MY PENDING REQUEST - Any user can check their pending request
 # -------------------------------------------------------------------------
 @credits_bp.route('/my-pending-request/<user_id>', methods=['GET'])
-@requires_auth
+@requires_auth()
 def get_my_pending_request(user_id):
     """Get user's most recent pending credit request"""
     try:
@@ -478,7 +604,7 @@ def get_my_pending_request(user_id):
 # 8. DELETE CREDIT REQUEST - User can cancel their own pending request
 # -------------------------------------------------------------------------
 @credits_bp.route('/<request_id>', methods=['DELETE'])
-@requires_auth
+@requires_auth()
 def delete_credit_request(request_id):
     """Delete/cancel a pending credit request"""
     try:

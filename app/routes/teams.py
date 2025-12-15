@@ -1,6 +1,12 @@
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, render_template
 from app.middleware.auth import requires_auth
-from app.database.mongo import users_coll, team_invitations_coll, ideas_coll, drafts_coll
+from app.database.mongo import (
+    users_coll,
+    team_invitations_coll,
+    ideas_coll,
+    drafts_coll,
+    invitation_tokens_coll
+)
 from app.utils.validators import clean_doc, normalize_user_id, normalize_any_id_field
 from app.utils.id_helpers import find_user, ids_match
 from app.services.email_service import EmailService
@@ -260,7 +266,7 @@ def _send_invite_email_existing_user(email, name, idea_title, inviter_id, draft_
 # 1. INVITE TEAM MEMBER (Existing or New User)
 # =========================================================================
 @teams_bp.route('/invite', methods=['POST'])
-@requires_auth
+@requires_auth()
 def invite_team_member():
     """
     Invite team members to a DRAFT idea.
@@ -441,7 +447,7 @@ def invite_team_member():
                 print(f"   Role: {existing_user.get('role')}")
                 
                 # Validate role
-                if existing_user.get('role') != 'innovator':
+                if existing_user.get('role') not in ['innovator', 'individual_innovator']:
                     print(f"❌ [INVALID ROLE] User role is '{existing_user.get('role')}', not 'innovator'")
                     results['errors'].append({
                         "email": email,
@@ -720,7 +726,7 @@ def invite_team_member():
 # 2. GET MY INVITATIONS (Received)
 # =========================================================================
 @teams_bp.route('/invitations/received', methods=['GET'])
-@requires_auth
+@requires_auth()
 def get_received_invitations():
     """Get all team invitations received by current user"""
     caller_id = request.user_id
@@ -757,7 +763,7 @@ def get_received_invitations():
 # 3. GET MY SENT INVITATIONS
 # =========================================================================
 @teams_bp.route('/invitations/sent', methods=['GET'])
-@requires_auth
+@requires_auth()
 def get_sent_invitations():
     """Get all team invitations sent by current user"""
     caller_id = request.user_id
@@ -794,7 +800,7 @@ def get_sent_invitations():
 # 4. ACCEPT INVITATION
 # =========================================================================
 @teams_bp.route('/invitations/<invitation_id>/accept', methods=['PUT'])
-@requires_auth
+@requires_auth()
 def accept_invitation(invitation_id):
     """Accept a team invitation"""
     caller_id = request.user_id
@@ -865,7 +871,7 @@ def accept_invitation(invitation_id):
 # 5. REJECT INVITATION
 # =========================================================================
 @teams_bp.route('/invitations/<invitation_id>/reject', methods=['PUT'])
-@requires_auth
+@requires_auth()
 def reject_invitation(invitation_id):
     """Reject a team invitation"""
     caller_id = request.user_id
@@ -926,7 +932,7 @@ def reject_invitation(invitation_id):
 # 6. CANCEL INVITATION (By Inviter)
 # =========================================================================
 @teams_bp.route('/invitations/<invitation_id>/cancel', methods=['DELETE'])
-@requires_auth
+@requires_auth()
 def cancel_invitation(invitation_id):
     """Cancel a pending invitation (only by inviter)"""
     caller_id = request.user_id
@@ -960,7 +966,7 @@ def cancel_invitation(invitation_id):
 # 7. REMOVE TEAM MEMBER (By Idea Owner)
 # =========================================================================
 @teams_bp.route('/ideas/<idea_id>/members/<member_id>', methods=['DELETE'])
-@requires_auth
+@requires_auth()
 def remove_team_member(idea_id, member_id):
     """Remove a team member from an idea (only by idea owner)"""
     caller_id = request.user_id
@@ -1038,7 +1044,7 @@ def remove_team_member(idea_id, member_id):
 # 8. GET TEAM MEMBERS FOR AN IDEA
 # =========================================================================
 @teams_bp.route('/ideas/<idea_id>/members', methods=['GET'])
-@requires_auth
+@requires_auth()
 def get_idea_team_members(idea_id):
     """Get all team members for a specific idea"""
     caller_id = request.user_id
@@ -1101,14 +1107,7 @@ def respond_to_invitation():
     This endpoint is accessed via the magic link in the email
     No authentication required - uses secure token instead
     """
-    from app.database import get_db
-    from flask import render_template
-    
-    db = get_db()
-    invitation_tokens_coll = db['invitation_tokens']
-    
-    token = request.args.get('token')
-    
+    token = request.args.get('token')    
     print("=" * 80)
     print("🔗 [MAGIC LINK] Invitation Response")
     print("=" * 80)
@@ -1155,14 +1154,22 @@ def respond_to_invitation():
     print(f"   Current time: {current_time}")
     print(f"   Expiry time: {expiry_time}")
     
-    if current_time > expiry_time:
-        print("❌ Token has expired")
-        time_diff = current_time - expiry_time
-        hours_ago = int(time_diff.total_seconds() / 3600)
-        return render_template('invitation_error.html',
-            error="Link Expired",
-            message=f"This invitation link expired {hours_ago} hour(s) ago. Please contact the project owner for a new invitation."
-        ), 410
+    # Validate and compare expiry time
+    if expiry_time and isinstance(expiry_time, datetime):
+        # Ensure timezone awareness
+        if expiry_time.tzinfo is None:
+            expiry_time = expiry_time.replace(tzinfo=timezone.utc)
+    
+        if current_time > expiry_time:
+            print("❌ Token has expired")
+            time_diff = current_time - expiry_time
+            hours_ago = int(time_diff.total_seconds() / 3600)
+            return render_template('invitation_error.html',
+                error="Link Expired",
+                message=f"This invitation link expired {hours_ago} hour(s) ago. Please contact the project owner for a new invitation."
+            ), 410
+    else:
+        print(f"⚠️ No valid expiry time set (token does not expire)")
     
     print(f"✅ Token is still valid")
     
@@ -1240,6 +1247,43 @@ def respond_to_invitation():
             ), 410
         
         print(f"✅ Email is in invitedTeam")
+
+        # ===== NEW: STEP 5A.2 - UPDATE TEAM INVITATION STATUS =====
+        print(f"\n💾 [STEP 5A.2] Updating team invitation status...")
+        try:
+            # Find the invitation record
+            invitation_record = team_invitations_coll.find_one({
+                "draftId": draft_id,
+                "inviteeEmail": invitee_email,
+                "status": "pending"
+            })
+            
+            if invitation_record:
+                print(f"   Found invitation record: {invitation_record.get('_id')}")
+                
+                # Update status to "accepted"
+                result = team_invitations_coll.update_one(
+                    {"_id": invitation_record['_id']},
+                    {
+                        "$set": {
+                            "status": "accepted",
+                            "respondedAt": datetime.now(timezone.utc)
+                        }
+                    }
+                )
+                
+                if result.modified_count > 0:
+                    print(f"✅ Invitation status updated to 'accepted'")
+                else:
+                    print(f"⚠️ Invitation was not modified")
+            else:
+                print(f"⚠️ No pending invitation record found for this email")
+        except Exception as e:  # ← THIS IS REQUIRED!
+            print(f"❌ Failed to update invitation status: {e}")
+            import traceback
+            traceback.print_exc()
+        
+
         
         # STEP 5B: Mark token as used
         print(f"\n💾 [STEP 5B] Marking token as used...")
@@ -1346,6 +1390,42 @@ def respond_to_invitation():
         else:
             print(f"⚠️ Email '{invitee_email}' not in invitedTeam (may have been removed already)")
         
+        # ===== NEW: STEP 6A.1 - UPDATE TEAM INVITATION STATUS =====
+        print(f"\n💾 [STEP 6A.1] Updating team invitation status...")
+        try:
+            # Find the invitation record
+            invitation_record = team_invitations_coll.find_one({
+                "draftId": draft_id,
+                "inviteeEmail": invitee_email,
+                "status": "pending"
+            })
+            
+            if invitation_record:
+                print(f"   Found invitation record: {invitation_record.get('_id')}")
+                
+                # Update status to "rejected"
+                result = team_invitations_coll.update_one(
+                    {"_id": invitation_record['_id']},
+                    {
+                        "$set": {
+                            "status": "rejected",
+                            "respondedAt": datetime.now(timezone.utc)
+                        }
+                    }
+                )
+                
+                if result.modified_count > 0:
+                    print(f"✅ Invitation status updated to 'rejected'")
+                else:
+                    print(f"⚠️ Invitation was not modified")
+            else:
+                print(f"⚠️ No pending invitation record found")
+        except Exception as e:
+            print(f"❌ Failed to update invitation status: {e}")
+            import traceback
+            traceback.print_exc()
+        
+
         # STEP 6B: Mark token as used
         print(f"\n💾 [STEP 6B] Marking token as used...")
         try:

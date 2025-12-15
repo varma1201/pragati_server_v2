@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Invitation Accepted - Pragati</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 600px;
+            width: 100%;
+            padding: 48px;
+            text-align: center;
+            animation: fadeIn 0.5s ease-in;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .icon {
+            width: 80px;
+            height: 80px;
+            background: #10b981;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 24px;
+            font-size: 48px;
+            animation: bounce 0.6s ease-in-out;
+        }
+        @keyframes bounce {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+        h1 {
+            color: #1f2937;
+            font-size: 32px;
+            margin-bottom: 16px;
+            font-weight: 700;
+        }
+        .project-title {
+            color: #667eea;
+            font-size: 24px;
+            margin-bottom: 24px;
+            font-weight: 600;
+        }
+        .message {
+            color: #6b7280;
+            font-size: 18px;
+            line-height: 1.6;
+            margin-bottom: 32px;
+        }
+        .next-steps {
+            background: #f9fafb;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 32px;
+            text-align: left;
+        }
+        .next-steps h3 {
+            color: #1f2937;
+            font-size: 18px;
+            margin-bottom: 16px;
+            font-weight: 600;
+        }
+        .next-steps ul {
+            list-style: none;
+            padding: 0;
+        }
+        .next-steps li {
+            color: #4b5563;
+            font-size: 16px;
+            padding: 8px 0;
+            padding-left: 28px;
+            position: relative;
+        }
+        .next-steps li:before {
+            content: "✓";
+            position: absolute;
+            left: 0;
+            color: #10b981;
+            font-weight: bold;
+            font-size: 18px;
+        }
+        .button {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 16px 32px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 16px;
+            transition: all 0.3s;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        .button:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(102, 126, 234, 0.5);
+        }
+        .footer {
+            margin-top: 32px;
+            color: #9ca3af;
+            font-size: 14px;
+        }
+        @media (max-width: 640px) {
+            .container {
+                padding: 32px 24px;
+            }
+            h1 {
+                font-size: 28px;
+            }
+            .project-title {
+                font-size: 20px;
+            }
+            .message {
+                font-size: 16px;
+            }
+            .button {
+                padding: 14px 28px;
+                font-size: 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">✅</div>
+        <h1>Invitation Accepted!</h1>
+        <div class="project-title">{{ project_title }}</div>
+        <p class="message">{{ message }}</p>
+        
+        {% if next_steps %}
+        <div class="next-steps">
+            <h3>Next Steps:</h3>
+            <ul>
+                {% for step in next_steps %}
+                <li>{{ step }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        
+        <a href="{{ platform_url }}/dashboard" class="button">Go to Dashboard</a>
+        
+        <div class="footer">
+            <p>Pragati Innovation Platform</p>
+        </div>
+    </div>
+</body>
+</html>

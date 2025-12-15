@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from app.middleware.auth import requires_role
-from app.database.mongo import users_coll, ideas_coll, drafts_coll, db
+from app.database.mongo import users_coll, ideas_coll, drafts_coll, db, consultation_requests_coll
 from app.utils.validators import clean_doc
 from datetime import datetime, timezone
 from app.services.psychometric_service import PsychometricService
@@ -457,7 +457,7 @@ def get_all_innovators():
     
     # Build query
     query = {
-        'role': 'innovator',
+        'role': {'$in': ['innovator', 'individual_innovator']},  # ✅ Include both types
         'isDeleted': {'$ne': True}
     }
     
@@ -966,3 +966,1016 @@ def get_dashboard_stats():
     }), 200
 
 
+# ============================================================================
+# EXTERNAL MENTORS - MANAGEMENT
+# ============================================================================
+
+@admin_bp.route('/external-mentors', methods=['GET'])
+@requires_role(['super_admin'])
+def list_external_mentors():
+    """
+    Get all external mentors (self-registered)
+    
+    Query params:
+        - status: "pending", "active", "inactive", "all"
+        - search: name or email
+        - page, limit
+    
+    Returns:
+        - List of mentors with bio, expertise, status
+    """
+    try:
+        # Query params
+        status = request.args.get('status', 'all').lower()
+        search = request.args.get('search', '').strip()
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 20))
+        skip = (page - 1) * limit
+        
+        # Build query
+        query = {
+            "role": "mentor",
+            "isDeleted": {"$ne": True},
+            "createdBy": None  # Self-registered (not created by admin)
+        }
+        
+        # Filter by status
+        if status == 'pending':
+            query['isActive'] = False
+            query['approvedBy'] = None
+        elif status == 'active':
+            query['isActive'] = True
+        elif status == 'inactive':
+            query['isActive'] = False
+            query['approvedBy'] = {"$ne": None}  # Was approved but deactivated
+        
+        # Search by name or email
+        if search:
+            query['$or'] = [
+                {"name": {"$regex": search, "$options": "i"}},
+                {"email": {"$regex": search, "$options": "i"}}
+            ]
+        
+        # Get total count
+        total = users_coll.count_documents(query)
+        
+        # Get mentors
+        cursor = users_coll.find(query, {"password": 0}).sort("createdAt", -1).skip(skip).limit(limit)
+        
+        mentors = []
+        for doc in cursor:
+            mentor = clean_doc(doc)
+            
+            # Add consultation count
+            mentor['consultationsCount'] = ideas_coll.count_documents({
+                "consultationMentorId": doc['_id'],
+                "isDeleted": {"$ne": True}
+            })
+            
+            # Add approval status
+            if doc.get('approvedBy'):
+                approver = users_coll.find_one({"_id": doc['approvedBy']}, {"name": 1})
+                mentor['approvedByName'] = approver.get('name') if approver else "Unknown"
+            
+            mentors.append(mentor)
+        
+        return jsonify({
+            "success": True,
+            "data": mentors,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Error listing external mentors: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to list mentors", "message": str(e)}), 500
+
+
+@admin_bp.route('/external-mentors/<mentor_id>/activate', methods=['PUT'])
+@requires_role(['super_admin'])
+def activate_external_mentor(mentor_id):
+    """
+    Activate an external mentor account
+    
+    Sets:
+        - isActive = True
+        - approvedBy = super_admin_id
+        - approvedAt = now
+    
+    Sends email notification to mentor
+    """
+    try:
+        caller_id = request.user_id
+        
+        # Convert ID
+        if ObjectId.is_valid(mentor_id):
+            mentor_id = ObjectId(mentor_id)
+        
+        # Find mentor
+        mentor = users_coll.find_one({
+            "_id": mentor_id,
+            "role": "mentor",
+            "isDeleted": {"$ne": True}
+        })
+        
+        if not mentor:
+            return jsonify({"error": "Mentor not found"}), 404
+        
+        if mentor.get('isActive'):
+            return jsonify({"error": "Mentor is already active"}), 400
+        
+        # Activate mentor
+        users_coll.update_one(
+            {"_id": mentor_id},
+            {
+                "$set": {
+                    "isActive": True,
+                    "approvedBy": caller_id,
+                    "approvedAt": datetime.now(timezone.utc),
+                    "updatedAt": datetime.now(timezone.utc)
+                }
+            }
+        )
+        
+        print(f"✅ Mentor activated: {mentor['email']}")
+        
+        # Send activation email
+        try:
+            email_service = EmailService(
+                current_app.config['SENDER_EMAIL'],
+                current_app.config['AWS_REGION']
+            )
+            
+            platform_url = current_app.config.get('PLATFORM_URL', 'http://localhost:3000')
+            login_url = f"{platform_url}/login"
+            
+            subject = "Pragati - Your Account Has Been Activated!"
+            html_body = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+            </head>
+            <body style="margin: 0; padding: 20px; font-family: Arial, sans-serif; background-color: #f5f5f5;">
+                <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; padding: 30px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <div style="text-align: center; margin-bottom: 30px;">
+                        <h1 style="color: #10b981; margin: 0;">🎉 Account Activated!</h1>
+                    </div>
+                    
+                    <p style="font-size: 16px; color: #333;">Hello <strong>{mentor['name']}</strong>,</p>
+                    
+                    <p style="font-size: 15px; color: #555; line-height: 1.6;">
+                        Great news! Your <strong>External Mentor</strong> account on Pragati Innovation Platform 
+                        has been approved and activated.
+                    </p>
+                    
+                    <div style="background: #d1fae5; padding: 15px; border-radius: 6px; border-left: 4px solid #10b981; margin: 20px 0;">
+                        <strong style="color: #065f46;">✅ You can now log in and start consulting!</strong>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="{login_url}" style="display: inline-block; padding: 14px 32px; background-color: #667eea; color: white; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px;">
+                            Log In to Pragati
+                        </a>
+                    </div>
+                    
+                    <div style="background: #f9fafb; padding: 20px; border-radius: 8px; margin: 25px 0; border: 1px solid #e5e7eb;">
+                        <h3 style="color: #667eea; margin-top: 0;">What You Can Do Now</h3>
+                        <ul style="padding-left: 20px; color: #555;">
+                            <li style="margin: 10px 0;">Review assigned ideas for consultation</li>
+                            <li style="margin: 10px 0;">Schedule consultation sessions with innovators</li>
+                            <li style="margin: 10px 0;">Provide expert feedback and guidance</li>
+                            <li style="margin: 10px 0;">Update your profile and expertise areas</li>
+                        </ul>
+                    </div>
+                    
+                    <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb; text-align: center;">
+                        <p style="font-size: 12px; color: #999; margin: 5px 0;">Pragati Innovation Platform</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            email_service.send_email(mentor['email'], subject, html_body)
+            print(f"✅ Activation email sent to {mentor['email']}")
+        except Exception as e:
+            print(f"⚠️ Activation email failed: {e}")
+        
+        # Send notification
+        try:
+            NotificationService.create_notification(
+                str(mentor_id),
+                "ACCOUNT_ACTIVATED",
+                message="Your account has been activated! You can now log in and start consulting."
+            )
+        except Exception as e:
+            print(f"⚠️ Notification failed: {e}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Mentor {mentor['name']} has been activated successfully"
+        }), 200
+        
+    except Exception as e:
+        print(f"Error activating mentor: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to activate mentor", "message": str(e)}), 500
+
+
+@admin_bp.route('/external-mentors/<mentor_id>/deactivate', methods=['PUT'])
+@requires_role(['super_admin'])
+def deactivate_external_mentor(mentor_id):
+    """
+    Deactivate an external mentor account
+    
+    Sets:
+        - isActive = False
+    
+    Mentor can no longer log in or access platform
+    """
+    try:
+        # Convert ID
+        if ObjectId.is_valid(mentor_id):
+            mentor_id = ObjectId(mentor_id)
+        
+        # Find mentor
+        mentor = users_coll.find_one({
+            "_id": mentor_id,
+            "role": "mentor",
+            "isDeleted": {"$ne": True}
+        })
+        
+        if not mentor:
+            return jsonify({"error": "Mentor not found"}), 404
+        
+        if not mentor.get('isActive'):
+            return jsonify({"error": "Mentor is already inactive"}), 400
+        
+        # Deactivate mentor
+        users_coll.update_one(
+            {"_id": mentor_id},
+            {
+                "$set": {
+                    "isActive": False,
+                    "updatedAt": datetime.now(timezone.utc)
+                }
+            }
+        )
+        
+        print(f"✅ Mentor deactivated: {mentor['email']}")
+        
+        # Send notification
+        try:
+            NotificationService.create_notification(
+                str(mentor_id),
+                "ACCOUNT_DEACTIVATED",
+                message="Your account has been deactivated. Please contact support if you believe this is an error."
+            )
+        except Exception as e:
+            print(f"⚠️ Notification failed: {e}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Mentor {mentor['name']} has been deactivated"
+        }), 200
+        
+    except Exception as e:
+        print(f"Error deactivating mentor: {e}")
+        return jsonify({"error": "Failed to deactivate mentor", "message": str(e)}), 500
+
+
+@admin_bp.route('/external-mentors/<mentor_id>', methods=['DELETE'])
+@requires_role(['super_admin'])
+def delete_external_mentor(mentor_id):
+    """
+    Soft delete an external mentor
+    
+    Sets:
+        - isDeleted = True
+        - deletedAt = now
+        - deletedBy = super_admin_id
+    """
+    try:
+        caller_id = request.user_id
+        
+        # Convert ID
+        if ObjectId.is_valid(mentor_id):
+            mentor_id = ObjectId(mentor_id)
+        
+        # Find mentor
+        mentor = users_coll.find_one({
+            "_id": mentor_id,
+            "role": "mentor",
+            "isDeleted": {"$ne": True}
+        })
+        
+        if not mentor:
+            return jsonify({"error": "Mentor not found"}), 404
+        
+        # Check if mentor has active consultations
+        active_consultations = ideas_coll.count_documents({
+            "consultationMentorId": mentor_id,
+            "consultationStatus": {"$in": ["assigned", "scheduled"]},
+            "isDeleted": {"$ne": True}
+        })
+        
+        if active_consultations > 0:
+            return jsonify({
+                "error": "Cannot delete mentor with active consultations",
+                "message": f"Mentor has {active_consultations} active consultation(s). Please reassign or complete them first."
+            }), 400
+        
+        # Soft delete
+        users_coll.update_one(
+            {"_id": mentor_id},
+            {
+                "$set": {
+                    "isDeleted": True,
+                    "deletedAt": datetime.now(timezone.utc),
+                    "deletedBy": caller_id,
+                    "isActive": False
+                }
+            }
+        )
+        
+        print(f"✅ Mentor deleted: {mentor['email']}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Mentor {mentor['name']} has been deleted successfully"
+        }), 200
+        
+    except Exception as e:
+        print(f"Error deleting mentor: {e}")
+        return jsonify({"error": "Failed to delete mentor", "message": str(e)}), 500
+
+
+# ============================================================================
+# INDIVIDUAL INNOVATORS - MANAGEMENT
+# ============================================================================
+
+@admin_bp.route('/individual-innovators', methods=['GET'])
+@requires_role(['super_admin'])
+def list_individual_innovators():
+    """
+    Get all individual innovators (self-registered, no college/TTC)
+    
+    Query params:
+        - status: "pending", "active", "inactive", "all"
+        - search: name or email
+        - page, limit
+    
+    Returns:
+        - List of individual innovators
+    """
+    try:
+        # Query params
+        status = request.args.get('status', 'all').lower()
+        search = request.args.get('search', '').strip()
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 20))
+        skip = (page - 1) * limit
+        
+        # Build query
+        query = {
+            "role": "individual_innovator",
+            "isDeleted": {"$ne": True}
+        }
+        
+        # Filter by status
+        if status == 'pending':
+            query['isActive'] = False
+            query['approvedBy'] = None
+        elif status == 'active':
+            query['isActive'] = True
+        elif status == 'inactive':
+            query['isActive'] = False
+            query['approvedBy'] = {"$ne": None}
+        
+        # Search by name or email
+        if search:
+            query['$or'] = [
+                {"name": {"$regex": search, "$options": "i"}},
+                {"email": {"$regex": search, "$options": "i"}}
+            ]
+        
+        # Get total count
+        total = users_coll.count_documents(query)
+        
+        # Get innovators
+        cursor = users_coll.find(query, {"password": 0}).sort("createdAt", -1).skip(skip).limit(limit)
+        
+        innovators = []
+        for doc in cursor:
+            innovator = clean_doc(doc)
+            
+            # Add ideas count
+            innovator['ideasCount'] = ideas_coll.count_documents({
+                "innovatorId": doc['_id'],
+                "isDeleted": {"$ne": True}
+            })
+            
+            # Add draft count
+            innovator['draftsCount'] = drafts_coll.count_documents({
+                "ownerId": doc['_id'],
+                "isDeleted": {"$ne": True},
+                "isSubmitted": False
+            })
+            
+            # Add approval info
+            if doc.get('approvedBy'):
+                approver = users_coll.find_one({"_id": doc['approvedBy']}, {"name": 1})
+                innovator['approvedByName'] = approver.get('name') if approver else "Unknown"
+            
+            innovators.append(innovator)
+        
+        return jsonify({
+            "success": True,
+            "data": innovators,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Error listing individual innovators: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to list innovators", "message": str(e)}), 500
+
+
+@admin_bp.route('/individual-innovators/<innovator_id>/activate', methods=['PUT'])
+@requires_role(['super_admin'])
+def activate_individual_innovator(innovator_id):
+    """Activate individual innovator - same logic as mentor activation"""
+    try:
+        caller_id = request.user_id
+        
+        if ObjectId.is_valid(innovator_id):
+            innovator_id = ObjectId(innovator_id)
+        
+        innovator = users_coll.find_one({
+            "_id": innovator_id,
+            "role": "individual_innovator",
+            "isDeleted": {"$ne": True}
+        })
+        
+        if not innovator:
+            return jsonify({"error": "Innovator not found"}), 404
+        
+        if innovator.get('isActive'):
+            return jsonify({"error": "Innovator is already active"}), 400
+        
+        users_coll.update_one(
+            {"_id": innovator_id},
+            {
+                "$set": {
+                    "isActive": True,
+                    "approvedBy": caller_id,
+                    "approvedAt": datetime.now(timezone.utc),
+                    "updatedAt": datetime.now(timezone.utc),
+                    "creditQuota": 100  # Give initial credits
+                }
+            }
+        )
+        
+        print(f"✅ Individual innovator activated: {innovator['email']}")
+        
+        # Send activation email (similar to mentor)
+        try:
+            email_service = EmailService(
+                current_app.config['SENDER_EMAIL'],
+                current_app.config['AWS_REGION']
+            )
+            
+            platform_url = current_app.config.get('PLATFORM_URL', 'http://localhost:3000')
+            login_url = f"{platform_url}/login"
+            
+            subject = "Pragati - Your Account Has Been Activated!"
+            html_body = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+            </head>
+            <body style="margin: 0; padding: 20px; font-family: Arial, sans-serif; background-color: #f5f5f5;">
+                <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; padding: 30px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <div style="text-align: center; margin-bottom: 30px;">
+                        <h1 style="color: #10b981; margin: 0;">🎉 Account Activated!</h1>
+                    </div>
+                    
+                    <p style="font-size: 16px; color: #333;">Hello <strong>{innovator['name']}</strong>,</p>
+                    
+                    <p style="font-size: 15px; color: #555; line-height: 1.6;">
+                        Great news! Your <strong>Individual Innovator</strong> account on Pragati Innovation Platform 
+                        has been approved and activated.
+                    </p>
+                    
+                    <div style="background: #d1fae5; padding: 15px; border-radius: 6px; border-left: 4px solid #10b981; margin: 20px 0;">
+                        <strong style="color: #065f46;">✅ You can now log in and start submitting ideas!</strong>
+                    </div>
+                    
+                    <div style="background: #f9fafb; padding: 20px; border-radius: 8px; margin: 25px 0; border: 2px solid #667eea;">
+                        <h3 style="color: #667eea; margin-top: 0;">🎁 Welcome Bonus</h3>
+                        <p style="margin: 10px 0;"><strong style="color: #667eea;">Credits Awarded:</strong><br>
+                            <span style="font-size: 24px; color: #667eea;">100 Credits</span>
+                        </p>
+                        <p style="font-size: 14px; color: #666; margin: 10px 0;">
+                            Use these credits to submit and validate your innovative ideas!
+                        </p>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="{login_url}" style="display: inline-block; padding: 14px 32px; background-color: #667eea; color: white; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px;">
+                            Log In to Pragati
+                        </a>
+                    </div>
+                    
+                    <div style="background: #f9fafb; padding: 20px; border-radius: 8px; margin: 25px 0; border: 1px solid #e5e7eb;">
+                        <h3 style="color: #667eea; margin-top: 0;">What You Can Do Now</h3>
+                        <ul style="padding-left: 20px; color: #555;">
+                            <li style="margin: 10px 0;">Complete your psychometric assessment</li>
+                            <li style="margin: 10px 0;">Create and submit innovative ideas</li>
+                            <li style="margin: 10px 0;">Get AI-powered validation reports</li>
+                            <li style="margin: 10px 0;">Track your idea's progress</li>
+                        </ul>
+                    </div>
+                    
+                    <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb; text-align: center;">
+                        <p style="font-size: 12px; color: #999; margin: 5px 0;">Pragati Innovation Platform</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            email_service.send_email(innovator['email'], subject, html_body)
+            print(f"✅ Activation email sent to {innovator['email']}")
+        except Exception as e:
+            print(f"⚠️ Activation email failed: {e}")
+        
+        # Send notification
+        try:
+            NotificationService.create_notification(
+                str(innovator_id),
+                "ACCOUNT_ACTIVATED",
+                message="Your account has been activated! You received 100 credits to start validating your ideas."
+            )
+        except Exception as e:
+            print(f"⚠️ Notification failed: {e}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Individual innovator {innovator['name']} has been activated successfully"
+        }), 200
+        
+    except Exception as e:
+        print(f"Error activating innovator: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to activate innovator", "message": str(e)}), 500
+
+
+@admin_bp.route('/individual-innovators/<innovator_id>/deactivate', methods=['PUT'])
+@requires_role(['super_admin'])
+def deactivate_individual_innovator(innovator_id):
+    """Deactivate individual innovator"""
+    try:
+        if ObjectId.is_valid(innovator_id):
+            innovator_id = ObjectId(innovator_id)
+        
+        innovator = users_coll.find_one({
+            "_id": innovator_id,
+            "role": "individual_innovator",
+            "isDeleted": {"$ne": True}
+        })
+        
+        if not innovator:
+            return jsonify({"error": "Innovator not found"}), 404
+        
+        if not innovator.get('isActive'):
+            return jsonify({"error": "Innovator is already inactive"}), 400
+        
+        users_coll.update_one(
+            {"_id": innovator_id},
+            {
+                "$set": {
+                    "isActive": False,
+                    "updatedAt": datetime.now(timezone.utc)
+                }
+            }
+        )
+        
+        print(f"✅ Individual innovator deactivated: {innovator['email']}")
+        
+        try:
+            NotificationService.create_notification(
+                str(innovator_id),
+                "ACCOUNT_DEACTIVATED",
+                message="Your account has been deactivated. Please contact support if you believe this is an error."
+            )
+        except Exception as e:
+            print(f"⚠️ Notification failed: {e}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Individual innovator {innovator['name']} has been deactivated"
+        }), 200
+        
+    except Exception as e:
+        print(f"Error deactivating innovator: {e}")
+        return jsonify({"error": "Failed to deactivate innovator", "message": str(e)}), 500
+
+
+@admin_bp.route('/individual-innovators/<innovator_id>', methods=['DELETE'])
+@requires_role(['super_admin'])
+def delete_individual_innovator(innovator_id):
+    """Soft delete individual innovator"""
+    try:
+        caller_id = request.user_id
+        
+        if ObjectId.is_valid(innovator_id):
+            innovator_id = ObjectId(innovator_id)
+        
+        innovator = users_coll.find_one({
+            "_id": innovator_id,
+            "role": "individual_innovator",
+            "isDeleted": {"$ne": True}
+        })
+        
+        if not innovator:
+            return jsonify({"error": "Innovator not found"}), 404
+        
+        # Check if innovator has submitted ideas
+        submitted_ideas = ideas_coll.count_documents({
+            "innovatorId": innovator_id,
+            "isDeleted": {"$ne": True}
+        })
+        
+        if submitted_ideas > 0:
+            return jsonify({
+                "error": "Cannot delete innovator with submitted ideas",
+                "message": f"Innovator has {submitted_ideas} submitted idea(s). Please archive or transfer them first."
+            }), 400
+        
+        # Soft delete
+        users_coll.update_one(
+            {"_id": innovator_id},
+            {
+                "$set": {
+                    "isDeleted": True,
+                    "deletedAt": datetime.now(timezone.utc),
+                    "deletedBy": caller_id,
+                    "isActive": False
+                }
+            }
+        )
+        
+        print(f"✅ Individual innovator deleted: {innovator['email']}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Individual innovator {innovator['name']} has been deleted successfully"
+        }), 200
+        
+    except Exception as e:
+        print(f"Error deleting innovator: {e}")
+        return jsonify({"error": "Failed to delete innovator", "message": str(e)}), 500
+# =========================================================================
+# CONSULTATION REQUESTS MANAGEMENT
+# =========================================================================
+
+@admin_bp.route('/consultation-requests', methods=['GET'])
+@requires_role(['super_admin'])
+def get_consultation_requests():
+    """
+    Get all consultation requests with optional status filter.
+    Query params:
+    - status: pending, approved, rejected (optional)
+    - page, limit: pagination
+    """
+    from bson import ObjectId
+    
+    print("=" * 80)
+    print("📋 FETCHING CONSULTATION REQUESTS")
+    
+    status_filter = request.args.get('status')
+    page = int(request.args.get('page', 1))
+    limit = int(request.args.get('limit', 50))
+    skip = (page - 1) * limit
+    
+    query = {}
+    
+    if status_filter:
+        query['status'] = status_filter
+        print(f"   Filter: status={status_filter}")
+    
+    try:
+        total = consultation_requests_coll.count_documents(query)
+        print(f"   Total requests: {total}")
+        
+        cursor = consultation_requests_coll.find(query).sort("createdAt", -1).skip(skip).limit(limit)
+        
+        requests_list = []
+        for req_doc in cursor:
+            req_data = clean_doc(req_doc)
+            requests_list.append(req_data)
+        
+        print(f"   Returning {len(requests_list)} requests")
+        print("=" * 80)
+        
+        return jsonify({
+            "success": True,
+            "data": requests_list,
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error fetching requests: {e}")
+        import traceback
+        traceback.print_exc()
+        print("=" * 80)
+        return jsonify({
+            "error": "Failed to fetch consultation requests",
+            "message": str(e)
+        }), 500
+
+
+@admin_bp.route('/consultation-requests/<request_id>/approve', methods=['POST'])
+@requires_role(['super_admin'])
+def approve_consultation_request(request_id):
+    """
+    Approve a consultation request and assign the mentor.
+    Body:
+    - scheduledAt: ISO datetime string (required)
+    """
+    from bson import ObjectId
+    
+    print("=" * 80)
+    print(f"✅ APPROVING CONSULTATION REQUEST: {request_id}")
+    
+    try:
+        body = request.get_json(force=True)
+        scheduled_at_str = body.get('scheduledAt')
+        
+        if not scheduled_at_str:
+            return jsonify({"error": "scheduledAt is required"}), 400
+        
+        # Parse scheduled date
+        try:
+            scheduled_at = datetime.fromisoformat(scheduled_at_str.replace("Z", "+00:00"))
+        except ValueError:
+            return jsonify({"error": "scheduledAt must be ISO datetime"}), 400
+        
+        # Find the request
+        request_id_query = request_id
+        try:
+            if ObjectId.is_valid(request_id):
+                request_id_query = ObjectId(request_id)
+        except:
+            pass
+        
+        consult_request = consultation_requests_coll.find_one({"_id": request_id_query})
+        
+        if not consult_request:
+            return jsonify({"error": "Consultation request not found"}), 404
+        
+        if consult_request.get('status') != 'pending':
+            return jsonify({
+                "error": "Request already processed",
+                "message": f"This request has already been {consult_request.get('status')}"
+            }), 409
+        
+        print(f"   Request found: {consult_request.get('ideaTitle')}")
+        
+        # Get data from request
+        idea_id = consult_request.get('ideaId')
+        mentor_id = consult_request.get('mentorId')
+        innovator_id = consult_request.get('innovatorId')
+        
+        # Update the idea with consultation
+        update_doc = {
+            "consultationMentorId": mentor_id,
+            "consultationMentorName": consult_request.get('mentorName'),
+            "consultationMentorEmail": consult_request.get('mentorEmail'),
+            "consultationScheduledAt": scheduled_at,
+            "consultationStatus": "assigned",
+            "consultationNotes": f"Approved from request by {consult_request.get('requesterName')}",
+            "updatedAt": datetime.now(timezone.utc)
+        }
+        
+        result = ideas_coll.update_one(
+            {"_id": idea_id},
+            {"$set": update_doc}
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({"error": "Failed to update idea"}), 500
+        
+        print(f"   ✅ Idea updated with consultation")
+        
+        # Update request status
+        consultation_requests_coll.update_one(
+            {"_id": request_id_query},
+            {
+                "$set": {
+                    "status": "approved",
+                    "approvedAt": datetime.now(timezone.utc),
+                    "approvedBy": request.user_id,
+                    "scheduledAt": scheduled_at,
+                    "updatedAt": datetime.now(timezone.utc)
+                }
+            }
+        )
+        
+        print(f"   ✅ Request marked as approved")
+        
+        # Notify stakeholders
+        notification_count = 0
+        scheduled_str = scheduled_at.strftime("%Y-%m-%d %H:%M UTC")
+        
+        notification_data = {
+            "ideaTitle": consult_request.get('ideaTitle'),
+            "mentorName": consult_request.get('mentorName'),
+            "mentorEmail": consult_request.get('mentorEmail'),
+            "scheduledAt": scheduled_str
+        }
+        
+        # 1. Notify requester (innovator or TTC)
+        requester_id = consult_request.get('requestedBy')
+        if requester_id:
+            try:
+                NotificationService.create_notification(
+                    requester_id,
+                    "CONSULTATION_REQUEST_APPROVED",
+                    notification_data,
+                    message=f"Your consultation request for '{consult_request.get('ideaTitle')}' has been approved"
+                )
+                notification_count += 1
+                print(f"   ✅ Requester notified")
+            except Exception as e:
+                print(f"   ⚠️ Failed to notify requester: {e}")
+        
+        # 2. Notify innovator (if different from requester)
+        if innovator_id and innovator_id != requester_id:
+            try:
+                NotificationService.create_notification(
+                    innovator_id,
+                    "CONSULTATION_ASSIGNED",
+                    notification_data,
+                    message=f"Consultation assigned for your idea '{consult_request.get('ideaTitle')}'"
+                )
+                notification_count += 1
+                print(f"   ✅ Innovator notified")
+            except Exception as e:
+                print(f"   ⚠️ Failed to notify innovator: {e}")
+        
+        # 3. Notify mentor
+        if mentor_id:
+            try:
+                NotificationService.create_notification(
+                    mentor_id,
+                    "CONSULTATION_ASSIGNED",
+                    notification_data,
+                    message=f"You are assigned as mentor for '{consult_request.get('ideaTitle')}'"
+                )
+                notification_count += 1
+                print(f"   ✅ Mentor notified")
+            except Exception as e:
+                print(f"   ⚠️ Failed to notify mentor: {e}")
+        
+        print(f"   📊 Notified {notification_count} users")
+        print("=" * 80)
+        
+        return jsonify({
+            "success": True,
+            "message": f"Consultation request approved and mentor assigned. {notification_count} users notified.",
+            "data": {
+                "requestId": str(request_id),
+                "ideaId": str(idea_id),
+                "mentorId": str(mentor_id),
+                "scheduledAt": scheduled_at.isoformat(),
+                "status": "approved"
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error approving request: {e}")
+        import traceback
+        traceback.print_exc()
+        print("=" * 80)
+        return jsonify({
+            "error": "Failed to approve request",
+            "message": str(e)
+        }), 500
+
+
+@admin_bp.route('/consultation-requests/<request_id>/reject', methods=['POST'])
+@requires_role(['super_admin'])
+def reject_consultation_request(request_id):
+    """
+    Reject a consultation request.
+    Body:
+    - reason: string (optional)
+    """
+    from bson import ObjectId
+    
+    print("=" * 80)
+    print(f"❌ REJECTING CONSULTATION REQUEST: {request_id}")
+    
+    try:
+        body = request.get_json(force=True) if request.data else {}
+        reason = body.get('reason', 'Request rejected by admin')
+        
+        # Find the request
+        request_id_query = request_id
+        try:
+            if ObjectId.is_valid(request_id):
+                request_id_query = ObjectId(request_id)
+        except:
+            pass
+        
+        consult_request = consultation_requests_coll.find_one({"_id": request_id_query})
+        
+        if not consult_request:
+            return jsonify({"error": "Consultation request not found"}), 404
+        
+        if consult_request.get('status') != 'pending':
+            return jsonify({
+                "error": "Request already processed",
+                "message": f"This request has already been {consult_request.get('status')}"
+            }), 409
+        
+        print(f"   Request found: {consult_request.get('ideaTitle')}")
+        
+        # Update request status
+        consultation_requests_coll.update_one(
+            {"_id": request_id_query},
+            {
+                "$set": {
+                    "status": "rejected",
+                    "rejectedAt": datetime.now(timezone.utc),
+                    "rejectedBy": request.user_id,
+                    "rejectionReason": reason,
+                    "updatedAt": datetime.now(timezone.utc)
+                }
+            }
+        )
+        
+        print(f"   ✅ Request marked as rejected")
+        
+        # Notify requester
+        requester_id = consult_request.get('requestedBy')
+        if requester_id:
+            try:
+                NotificationService.create_notification(
+                    requester_id,
+                    "CONSULTATION_REQUEST_REJECTED",
+                    {
+                        "ideaTitle": consult_request.get('ideaTitle'),
+                        "mentorName": consult_request.get('mentorName'),
+                        "reason": reason
+                    },
+                    message=f"Your consultation request for '{consult_request.get('ideaTitle')}' was rejected"
+                )
+                print(f"   ✅ Requester notified")
+            except Exception as e:
+                print(f"   ⚠️ Failed to notify requester: {e}")
+        
+        print("=" * 80)
+        
+        return jsonify({
+            "success": True,
+            "message": "Consultation request rejected",
+            "data": {
+                "requestId": str(request_id),
+                "status": "rejected",
+                "reason": reason
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error rejecting request: {e}")
+        import traceback
+        traceback.print_exc()
+        print("=" * 80)
+        return jsonify({
+            "error": "Failed to reject request",
+            "message": str(e)
+        }), 500

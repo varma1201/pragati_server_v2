@@ -123,6 +123,51 @@ class NotificationService:
             "icon": "x-circle",
             "priority": "low"
         },
+        'NEW_REGISTRATION': {
+            'title': 'New Registration Pending',
+            'description': '{userName} ({userRole}) registered and needs approval'
+        },
+        'ACCOUNT_ACTIVATED': {
+            'title': 'Account Activated',
+            'description': 'Your account has been activated! You can now log in.'
+        },
+        'ACCOUNT_DEACTIVATED': {
+            'title': 'Account Deactivated',
+            'description': 'Your account has been deactivated. Please contact support.'
+        },
+        "CONSULTATION_REQUESTED": {
+            "title": "Consultation Requested",
+            "description": "{innovatorName} requested a consultation for \"{ideaTitle}\""
+        },
+        "CONSULTATION_ASSIGNED": {
+            "title": "Consultation Assigned",
+            "description": "Consultation for \"{ideaTitle}\" has been assigned to {mentorName}"
+        },
+        "CONSULTATION_CANCELLED": {
+            "title": "Consultation Cancelled",
+            "description": "Consultation for \"{ideaTitle}\" was cancelled. Reason: {reason}"
+        },
+        "CONSULTATION_RESCHEDULED": {
+            "title": "Consultation Rescheduled",
+            "description": "Consultation for \"{ideaTitle}\" was rescheduled from {oldScheduledAt} to {newScheduledAt}"
+        },
+        "CONSULTATION_REQUEST_RECEIVED": {
+            "title": "Consultation Request Received",
+            "description": "New consultation request for \"{ideaTitle}\" from {requesterName} ({requesterRole})"
+        },
+        "CONSULTATION_REQUEST_SUBMITTED_BY_TTC": {
+            "title": "Consultation Requested by TTC",
+            "description": "{ttcName} requested a consultation for \"{ideaTitle}\" with {mentorName}"
+        },    
+        "CONSULTATION_ACCEPTED": {
+            "title": "Consultation Accepted",
+            "description": "{mentorName} accepted the consultation for \"{ideaTitle}\" scheduled on {scheduledAt}"
+        },
+        "CONSULTATION_REJECTED": {
+            "title": "Consultation Rejected",
+            "description": "{mentorName} rejected the consultation for \"{ideaTitle}\". Reason: {reason}"
+        },
+
     }
     
     @staticmethod

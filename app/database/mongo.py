@@ -101,11 +101,28 @@ notifications_coll = db['notifications']
 # Team Invitations - Already present but verify collection name
 #--------------------------------------------------------------------------
 team_invitations_coll = db["team_invitations"]  # Change from "pragati_team_invitations" for consistency
+invitation_tokens_coll = db["invitation_tokens"]
 
 #--------------------------------------------------------------------------
 # Reports
 #--------------------------------------------------------------------------
 results_coll = db['results']
+
+generated_reports_coll = db["generated_reports"]  # For Reports Hub exports/summaries
+scheduled_reports_coll = db["scheduled_reports"]   # For scheduled report jobs
+
+audit_logs_coll = db["audit_logs"] 
+
+credit_requests_coll = db["pragati-innovation-suite_credit_requests_internal"]
+credit_history_coll = db["pragati-innovation-suite_credit_history"]
+
+otp_coll = db["otp_codes"]  # ✅ FIX BUG #3
+
+consultation_requests_coll = db['consultation_requests']
+
+evaluations_coll = db['user_profiles']
+
+mentor_evaluations_coll = db['mentor_profiles']
 
 # -------------------------------------------------------------------------
 # Database Health Check
@@ -183,6 +200,39 @@ def create_indexes():
         
         # ✅ Legal documents index
         legal_docs_coll.create_index([("collegeId", 1)], unique=True)
+
+        # ✅ NEW: Reports Hub indexes
+        generated_reports_coll.create_index([("userId", 1), ("createdAt", -1)])
+        generated_reports_coll.create_index([("status", 1)])
+        scheduled_reports_coll.create_index([("userId", 1)])
+        scheduled_reports_coll.create_index([("nextRunAt", 1)])
+
+        # ✅ NEW: Audit logs indexes
+        audit_logs_coll.create_index([("collegeId", 1), ("timestamp", -1)])
+        audit_logs_coll.create_index([("actorId", 1), ("timestamp", -1)])
+        audit_logs_coll.create_index([("category", 1)])
+        audit_logs_coll.create_index([("timestamp", -1)])
+        
+        # ✅ NEW: Credit requests indexes
+        credit_requests_coll.create_index([("to", 1), ("status", 1)])
+        credit_requests_coll.create_index([("from", 1), ("status", 1)])
+        credit_requests_coll.create_index([("createdAt", -1)])
+        
+        # ✅ NEW: Credit history indexes
+        credit_history_coll.create_index([("userId", 1), ("createdAt", -1)])
+        credit_history_coll.create_index([("userId", 1), ("credit", -1)])
+
+        # ✅ NEW: Consultation requests indexes
+        consultation_requests_coll.create_index([("ideaId", 1), ("status", 1)])
+        consultation_requests_coll.create_index([("ideaId", 1), ("createdAt", -1)])
+
+        # ✅ NEW: User profiles indexes
+        evaluations_coll.create_index([("userId", 1), ("status", 1)])
+        evaluations_coll.create_index([("userId", 1), ("createdAt", -1)])
+
+        # ✅ NEW: Mentor profiles indexes
+        mentor_evaluations_coll.create_index([("userId", 1), ("status", 1)])
+        mentor_evaluations_coll.create_index([("userId", 1), ("createdAt", -1)])
         
         print("✅ Database indexes created successfully")
         

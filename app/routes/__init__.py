@@ -14,14 +14,16 @@ def register_blueprints(app):
     from app.routes.reports import reports_bp
     from app.routes.reports_pdf import reports_pdf_bp
     from app.routes.principal import principal_bp
-    
+    from app.routes.audit import audit_bp
+    from app.routes.dashboard import dashboard_bp
+
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
     app.register_blueprint(ideas_bp)
     app.register_blueprint(credits_bp)
     app.register_blueprint(analytics_bp)
     app.register_blueprint(psychometric_bp)
-    app.register_blueprint(coordinator_bp)
+    app.register_blueprint(coordinator_bp)  
     app.register_blueprint(mentors_bp)
     app.register_blueprint(teams_bp)
     app.register_blueprint(admin_bp)
@@ -30,3 +32,5 @@ def register_blueprints(app):
     app.register_blueprint(reports_bp)
     app.register_blueprint(reports_pdf_bp)
     app.register_blueprint(principal_bp)
+    app.register_blueprint(audit_bp)
+    app.register_blueprint(dashboard_bp)

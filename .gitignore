@@ -128,6 +128,11 @@ Thumbs.db
 # Node modules (if any frontend dependencies)
 node_modules/
 
+*.backup
+**/*.backup
+app/routes/*.backup
+app/middleware/*.backup
+
 # Uploaded files
 uploads/
 uploaded_pitch_decks/

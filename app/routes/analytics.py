@@ -14,7 +14,7 @@ analytics_bp = Blueprint('analytics', __name__, url_prefix='/api/analytics')
 # 1. DOMAIN TREND - Shows idea distribution by domain
 # -------------------------------------------------------------------------
 @analytics_bp.route('/domain-trend', methods=['GET'])
-@requires_auth
+@requires_auth()
 def domain_trend():
     """Domain-wise idea counts"""
     caller = request.token_payload
@@ -301,7 +301,7 @@ def innovator_engagement():
 # 8. INNOVATOR PERSONAL STATS - Overview metrics for innovator's dashboard
 # -------------------------------------------------------------------------
 @analytics_bp.route('/innovator/stats', methods=['GET'])
-@requires_role(['innovator'])
+@requires_role(['innovator', 'individual_innovator'])
 def innovator_personal_stats():
     """Get personal statistics for the logged-in innovator"""
     caller_id = request.user_id
@@ -348,7 +348,7 @@ def innovator_personal_stats():
 # 9. INNOVATOR SCORE OVER TIME - Track improvement
 # -------------------------------------------------------------------------
 @analytics_bp.route('/innovator/score-timeline', methods=['GET'])
-@requires_role(['innovator'])
+@requires_role(['innovator', 'individual_innovator'])
 def innovator_score_timeline():
     """Get score progression over time for the innovator"""
     caller_id = request.user_id
@@ -393,7 +393,7 @@ def innovator_score_timeline():
 # 10. INNOVATOR CLUSTER PERFORMANCE - Spider chart data
 # -------------------------------------------------------------------------
 @analytics_bp.route('/innovator/cluster-performance', methods=['GET'])
-@requires_role(['innovator'])
+@requires_role(['innovator', 'individual_innovator'])
 def innovator_cluster_performance():
     """Get average cluster scores for the innovator"""
     caller_id = request.user_id
@@ -449,7 +449,7 @@ def innovator_cluster_performance():
 # 11. INNOVATOR IDEAS LIST - All ideas with scores
 # -------------------------------------------------------------------------
 @analytics_bp.route('/innovator/ideas', methods=['GET'])
-@requires_role(['innovator'])
+@requires_role(['innovator', 'individual_innovator'])
 def innovator_ideas_list():
     """Get list of all ideas with basic info and scores"""
     caller_id = request.user_id

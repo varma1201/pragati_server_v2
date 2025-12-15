@@ -10,7 +10,7 @@ search_bp = Blueprint('search', __name__, url_prefix='/api/search')
 
 
 @search_bp.route('/global', methods=['GET'])
-@requires_auth
+@requires_auth()
 def global_search():
     """
     Global search across users, ideas, colleges, mentors
@@ -61,7 +61,7 @@ def global_search():
         }
         
         # Role-based filtering
-        if caller_role == 'innovator':
+        if caller_role in ['innovator', 'individual_innovator']:
             # Innovators can only see mentors and team members
             user_query['$and'] = [
                 {
@@ -129,7 +129,7 @@ def global_search():
         ]
         
         # Role-based filtering
-        if caller_role == 'innovator':
+        if caller_role in ['innovator', 'individual_innovator']:
             # Innovators see their own ideas + shared ideas
             idea_query['$and'] = [
                 {'$or': search_conditions},
@@ -144,7 +144,7 @@ def global_search():
             # TTC sees ideas from their innovators
             innovator_ids = list(users_coll.distinct(
                 '_id',
-                {'createdBy': caller_id, 'role': 'innovator'}
+                {'createdBy': caller_id, 'role': {'$in': ['innovator', 'individual_innovator']}}
             ))
             idea_query['$and'] = [
                 {'$or': search_conditions},
@@ -154,7 +154,7 @@ def global_search():
             # College admin sees ideas from their college
             innovator_ids = list(users_coll.distinct(
                 '_id',
-                {'collegeId': caller_id, 'role': 'innovator'}
+                {'collegeId': caller_id, 'role': {'$in': ['innovator', 'individual_innovator']}}
             ))
             idea_query['$and'] = [
                 {'$or': search_conditions},
@@ -224,7 +224,7 @@ def global_search():
         ]
         
         # Role-based filtering for internal mentors
-        if caller_role == 'innovator':
+        if caller_role in ['innovator', 'individual_innovator']:
             # Show internal mentors from same TTC
             innovator = users_coll.find_one({'_id': caller_id}, {'ttcCoordinatorId': 1})
             if innovator and innovator.get('ttcCoordinatorId'):
@@ -270,7 +270,7 @@ def global_search():
 
 
 @search_bp.route('/suggestions', methods=['GET'])
-@requires_auth
+@requires_auth()
 def search_suggestions():
     """
     Quick search suggestions (autocomplete)

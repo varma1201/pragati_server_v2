@@ -12,7 +12,7 @@ from bson import ObjectId
 import traceback
 import logging
 
-from app.database.mongo import db, users_coll
+from app.database.mongo import db, users_coll, mentor_evaluations_coll
 from app.middleware.auth import requires_role, requires_auth
 from app.utils.validators import clean_doc
 from app.utils.validators import normalize_user_id, normalize_any_id_field, clean_doc, get_user_by_any_id
@@ -33,7 +33,7 @@ profiles_coll = db.user_profiles
 # =========================================================================
 
 @psychometric_bp.route('/profile', methods=['GET'])
-@requires_auth
+@requires_auth()
 def get_psychometric_profile():
     """
     Get user's psychometric profile from latest evaluation.
@@ -133,7 +133,7 @@ def get_psychometric_profile():
 # =========================================================================
 
 @psychometric_bp.route('/status', methods=['GET'])
-@requires_auth
+@requires_auth()
 def get_psychometric_status():
     """
     Check if user has completed psychometric assessment and get summary.
@@ -184,86 +184,135 @@ def get_psychometric_status():
 # =========================================================================
 
 @psychometric_bp.route('/results', methods=['GET'])
-@requires_auth
+@requires_auth()
 def get_psychometric_results():
-    """
-    Get full detailed psychometric assessment results.
-    Auth: User can view own results; admins/coordinators can view their users.
-    
-    Returns:
-        {
-            "success": bool,
-            "data": {
-                "evaluationId": str,
-                "overallScore": float,
-                "dimensionScores": { dimension: score, ... },
-                "strengths": [str],
-                "areasForDevelopment": [str],
-                "personalityProfile": str,
-                "entrepreneurialFit": {...},
-                "recommendations": [str],
-                "detailedInsights": {...},
-                "completedAt": str,
-                "questionsAnswered": int,
-                "completionRate": float
-            }
-        }
-    """
+    """Get full detailed psychometric assessment results."""
     try:
         user_id = request.user_id
         caller_role = getattr(request, "user_role", None)
-
-        # Authorization: can view own or if coordinator/admin
-        if caller_role not in ["ttc_coordinator", "college_admin", "super_admin"]:
-            # User can only view own results
-            pass
-
-        logger.info(f"Fetching psychometric results for user: {user_id}")
-
-        # Get latest evaluation
-        eval_doc = evaluations_coll.find_one(
-            {"evaluation_result.user_id": user_id},
-            sort=[("evaluation_result.evaluated_at", -1)]
+        
+        print("=" * 80)
+        print("🔍 Fetching psychometric results")
+        print(f"   User ID: {user_id}")
+        print(f"   Role: {caller_role}")
+        
+        # Determine collection
+        if caller_role in ["mentor", "internal_mentor", "external_mentor"]:
+            print("   📚 Querying mentor_evaluations_coll")
+            collection = mentor_evaluations_coll
+            is_mentor = True
+        else:
+            print("   📚 Querying evaluations_coll (innovators)")
+            collection = evaluations_coll
+            is_mentor = False
+        
+        # Query with user_id as string, sort by most recent
+        query = {"user_id": str(user_id)}
+        
+        # ✅ DEBUG: Check all documents for this user
+        all_docs = list(collection.find(query).sort("created_at", -1))
+        print(f"   📊 Found {len(all_docs)} total documents for this user")
+        for idx, doc in enumerate(all_docs):
+            print(f"      [{idx}] ID: {doc.get('_id')} | Score: {doc.get('overall_psychometric_score' if not is_mentor else 'overall_mentor_score', 0)} | Created: {doc.get('created_at')}")
+        
+        # Get the latest one
+        eval_doc = collection.find_one(
+            query,
+            sort=[("created_at", -1)]
         )
-
+        
         if not eval_doc:
-            logger.info(f"No assessment results found for user: {user_id}")
-            return jsonify({"error": "No assessment found"}), 404
-
-        eval_result = eval_doc.get("evaluation_result", {})
-
-        result_data = {
-            "evaluationId": str(eval_doc.get("_id", "")),
-            "overallScore": eval_result.get("overall_score", 0),
-            "dimensionScores": eval_result.get("dimension_scores", {}),
-            "strengths": eval_result.get("strengths", []),
-            "areasForDevelopment": eval_result.get("areas_for_development", []),
-            "personalityProfile": eval_result.get("personality_profile", ""),
-            "entrepreneurialFit": eval_result.get("entrepreneurial_fit", {}),
-            "recommendations": eval_result.get("recommendations", []),
-            "detailedInsights": eval_result.get("detailed_insights", {}),
-            "completedAt": eval_result.get("evaluated_at"),
-            "questionsAnswered": eval_result.get("questions_answered", 0),
-            "completionRate": eval_result.get("completion_rate", 0)
-        }
-
+            print(f"   ⚠️ No assessment found")
+            return jsonify({
+                "success": True,
+                "data": None,
+                "message": "No psychometric assessment completed yet"
+            }), 200
+        
+        print(f"   ✅ Found assessment: {eval_doc.get('_id')}")
+        print(f"   Document keys: {list(eval_doc.keys())}")
+        print(f"   Raw scores: {eval_doc.get('psychometric_scores', {})}")
+        print(f"   Overall score field value: {eval_doc.get('overall_psychometric_score' if not is_mentor else 'overall_mentor_score')}")
+  
+        # Build response
+        if is_mentor:
+            result_data = {
+                "evaluationId": str(eval_doc.get("_id", "")),
+                "userId": str(user_id),
+                "profileType": "mentor",
+                "userName": eval_doc.get("user_name", ""),
+                "overallScore": eval_doc.get("overall_mentor_score", 0),
+                "dimensionScores": eval_doc.get("psychometric_scores", {}),
+                "strengths": eval_doc.get("top_strengths", []),
+                "areasForDevelopment": eval_doc.get("development_areas", []),
+                "personalityProfile": eval_doc.get("mentor_profile_summary", ""),
+                "entrepreneurialFit": {
+                    "overall_fit": eval_doc.get("mentoring_fit", ""),
+                    "fit_score": eval_doc.get("fit_score", 0),
+                    "mentoring_readiness": eval_doc.get("mentoring_readiness", ""),
+                    "teaching_style": eval_doc.get("teaching_style", ""),
+                    "mentoring_capacity": eval_doc.get("mentoring_capacity", ""),
+                    "expertise_domains": eval_doc.get("expertise_domains", []),
+                    "ideal_mentee_profile": eval_doc.get("ideal_mentee_profile", {})
+                },
+                "recommendations": eval_doc.get("recommendations", []),
+                "detailedInsights": eval_doc.get("detailed_insights", {}),
+                "completedAt": eval_doc.get("assessment_date", eval_doc.get("created_at")),
+                "lastUpdated": eval_doc.get("last_updated"),
+                "profileCompleteness": eval_doc.get("profile_completeness", 0),
+                "questionsAnswered": 0,
+                "completionRate": eval_doc.get("profile_completeness", 0)
+            }
+        else:
+            # Innovator
+            result_data = {
+                "evaluationId": str(eval_doc.get("_id", "")),
+                "userId": str(user_id),
+                "profileType": "innovator",
+                "userName": eval_doc.get("user_name", ""),
+                "overallScore": eval_doc.get("overall_psychometric_score", 0),  # ✅ Correct field
+                "dimensionScores": eval_doc.get("psychometric_scores", {}),
+                "strengths": eval_doc.get("top_strengths", []),
+                "areasForDevelopment": eval_doc.get("development_areas", []),
+                "personalityProfile": eval_doc.get("personality_profile", ""),
+                "entrepreneurialFit": {
+                    "overall_fit": eval_doc.get("entrepreneurial_fit", ""),
+                    "fit_score": eval_doc.get("fit_score", 0),
+                    "ideal_role": eval_doc.get("ideal_role", ""),
+                    "ideal_venture_type": eval_doc.get("ideal_venture_type", ""),
+                    "risk_tolerance_level": eval_doc.get("risk_tolerance_level", ""),
+                    "validation_focus_areas": eval_doc.get("validation_focus_areas", [])
+                },
+                "recommendations": eval_doc.get("recommendations", []),
+                "detailedInsights": eval_doc.get("detailed_insights", {}),
+                "completedAt": eval_doc.get("assessment_date", eval_doc.get("created_at")),
+                "lastUpdated": eval_doc.get("last_updated"),
+                "profileCompleteness": eval_doc.get("profile_completeness", 0),
+                "questionsAnswered": 0,
+                "completionRate": eval_doc.get("profile_completeness", 0)
+            }
+        
+        print(f"   ✅ Returning score: {result_data['overallScore']}")
+        print("=" * 80)
+        
         return jsonify({
             "success": True,
             "data": result_data
         }), 200
-
+    
     except Exception as e:
+        print(f"   ❌ ERROR: {str(e)}")
         logger.error(f"Failed to get psychometric results: {str(e)}")
         logger.error(traceback.format_exc())
+        print("=" * 80)
         return jsonify({"error": str(e)}), 500
-
 
 # =========================================================================
 # 4. GET DIMENSION BREAKDOWN (for charts)
 # =========================================================================
 
 @psychometric_bp.route('/dimensions', methods=['GET'])
-@requires_auth
+@requires_auth()
 def get_dimension_breakdown():
     """
     Get dimension/attribute scores breakdown for charting.
@@ -336,7 +385,7 @@ def get_dimension_breakdown():
 # =========================================================================
 
 @psychometric_bp.route('/team-compatibility', methods=['POST'])
-@requires_auth
+@requires_auth()
 def check_team_compatibility():
     """
     Calculate team compatibility based on stored psychometric profiles.

@@ -18,7 +18,7 @@ notifications_coll = db['notifications']
 # =========================================================================
 
 @notifications_bp.route('/', methods=['GET'], strict_slashes=False)
-@requires_auth
+@requires_auth()
 def get_notifications():
     """
     Get notifications for current user
@@ -56,7 +56,7 @@ def get_notifications():
 # =========================================================================
 
 @notifications_bp.route('/unread-count', methods=['GET'])
-@requires_auth
+@requires_auth()
 def get_unread_count():
     """Get count of unread notifications for current user"""
     user_id = request.user_id
@@ -78,7 +78,7 @@ def get_unread_count():
 # =========================================================================
 
 @notifications_bp.route('/<notification_id>/read', methods=['PUT'])  # ✅ FIXED: Proper route
-@requires_auth
+@requires_auth()
 def mark_notification_read(notification_id):
     """Mark a single notification as read"""
     user_id = request.user_id
@@ -128,7 +128,7 @@ def mark_notification_read(notification_id):
 # =========================================================================
 
 @notifications_bp.route('/mark-all-read', methods=['PUT'])
-@requires_auth
+@requires_auth()
 def mark_all_read():
     """Mark all notifications as read for current user"""
     user_id = request.user_id
@@ -160,7 +160,7 @@ def mark_all_read():
 # =========================================================================
 
 @notifications_bp.route('/<notification_id>', methods=['DELETE'])  # ✅ FIXED: Proper route with parameter
-@requires_auth
+@requires_auth()
 def delete_notification(notification_id):
     """Delete a specific notification"""
     user_id = request.user_id
@@ -210,7 +210,7 @@ def delete_notification(notification_id):
 # =========================================================================
 
 @notifications_bp.route('/clear-read', methods=['DELETE'])
-@requires_auth
+@requires_auth()
 def clear_read_notifications():
     """Delete all read notifications for current user"""
     user_id = request.user_id

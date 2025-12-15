@@ -13,12 +13,12 @@ from bson import ObjectId
 
 users_bp = Blueprint('users', __name__, url_prefix='/api/users')
 
-
 # -------------------------------------------------------------------------
 # 1. GET CURRENT USER - Get authenticated user's profile
 # -------------------------------------------------------------------------
+
 @users_bp.route('/me', methods=['GET'])
-@requires_auth
+@requires_auth(allow_inactive=True)  # ✅ Add parentheses and allow inactive
 def get_current_user():
     """Get current authenticated user's profile"""
     user_id = request.user_id
@@ -31,6 +31,10 @@ def get_current_user():
     if not user:
         return jsonify({"error": "User not found"}), 404
     
+    # Remove password
+    if 'password' in user:
+        del user['password']
+    
     return jsonify({
         "success": True,
         "data": clean_doc(user)
@@ -40,8 +44,9 @@ def get_current_user():
 # -------------------------------------------------------------------------
 # 2. GET USER BY ID - Retrieve any user's profile
 # -------------------------------------------------------------------------
-@users_bp.route('/<user_id>', methods=['GET'])
-@requires_auth
+
+@users_bp.route('/<user_id>', methods=['GET'])  # ✅ Fixed route with <user_id>
+@requires_auth()
 def get_user_by_id(user_id):
     """Get user by ID - supports both ObjectId and string UUID"""
     print(f"🔍 Looking for user: {user_id}")
@@ -56,21 +61,23 @@ def get_user_by_id(user_id):
         print(f"❌ User not found: {user_id}")
         return jsonify({"error": "User not found"}), 404
     
-    # ✅ FIX: Remove password before returning
+    # ✅ Remove password before returning
     if 'password' in user:
         del user['password']
     
     print(f"✅ User found: {user.get('email')}")
+    
     return jsonify({
-        "success": True, 
-        "data": clean_doc(user)  # ✅ Now safe because password is removed
+        "success": True,
+        "data": clean_doc(user)
     }), 200
 
 
 # -------------------------------------------------------------------------
 # 3. LIST USERS - Get users with filtering
 # -------------------------------------------------------------------------
-@users_bp.route('/', methods=['GET'], strict_slashes=False)
+
+@users_bp.route('/', methods=['GET'], strict_slashes=False)  # ✅ Different route - no parameter
 @requires_role(["super_admin", "college_admin", "ttc_coordinator"])
 def list_users():
     """List users with optional filters"""
@@ -82,18 +89,25 @@ def list_users():
     
     if role_filter:
         query["role"] = role_filter
+    
     if college_id and not ttc_id:
         query.update({"role": "ttc_coordinator", "collegeId": college_id})
+    
     if college_id and ttc_id:
         query.update({"role": "innovator", "collegeId": college_id, "createdBy": ttc_id})
-    
+ 
     cursor = users_coll.find(query, {"password": 0})
-    return jsonify({"docs": [clean_doc(doc) for doc in cursor], "success": True}), 200
+    
+    return jsonify({
+        "docs": [clean_doc(doc) for doc in cursor],
+        "success": True
+    }), 200
 
 
 # -------------------------------------------------------------------------
 # 4. CREATE USER - Admin creates new user
 # -------------------------------------------------------------------------
+
 @users_bp.route('/', methods=['POST'], strict_slashes=False)
 @requires_role(['super_admin', 'college_admin', 'ttc_coordinator'])
 def create_user():
@@ -118,11 +132,11 @@ def create_user():
         return jsonify({"error": "Email already exists"}), 409
     
     # Authorization checks
-    if caller_role == 'ttc_coordinator' and role != 'innovator':
+    if caller_role == 'ttc_coordinator' and role not in ['innovator', 'individual_innovator']:
         return jsonify({"error": "TTC can only create innovators"}), 403
     
-    if caller_role == 'college_admin' and role not in ['ttc_coordinator', 'innovator', 'internal_mentor']:
-        return jsonify({"error": "College admin can create TTC, innovators, or mentors"}), 403
+    if caller_role == 'college_admin' and role not in ['ttc_coordinator', 'innovator', 'individual_innovator', 'internal_mentor']:
+        return jsonify({"error": "College admin can create TTC, innovators, individual_innovators, or mentors"}), 403
     
     # Generate temporary password
     auth_service = AuthService(current_app.config['JWT_SECRET'])
@@ -143,16 +157,19 @@ def create_user():
     }
     
     # Add role-specific fields
-    if role == 'innovator':
+    if role in ['innovator', 'individual_innovator']:
         user_doc['creditQuota'] = 0
         user_doc['isPsychometricAnalysisDone'] = False
+        
         if caller_role == 'ttc_coordinator':
             user_doc['ttcCoordinatorId'] = caller_id
+            
             # Get caller's college ID
             caller = users_coll.find_one({
                 **normalize_user_id(caller_id),
                 "isDeleted": {"$ne": True}
             }, {"collegeId": 1})
+            
             if caller and caller.get('collegeId'):
                 user_doc['collegeId'] = caller['collegeId']
     
@@ -164,11 +181,13 @@ def create_user():
     if role == 'internal_mentor':
         if caller_role == 'ttc_coordinator':
             user_doc['ttcCoordinatorId'] = caller_id
+            
             # Get caller's college ID
             caller = users_coll.find_one({
                 **normalize_user_id(caller_id),
                 "isDeleted": {"$ne": True}
             }, {"collegeId": 1})
+            
             if caller and caller.get('collegeId'):
                 user_doc['collegeId'] = caller['collegeId']
         elif college_id:
@@ -178,19 +197,25 @@ def create_user():
     users_coll.insert_one(user_doc)
     
     # ✅ NOTIFY new user about account creation
-    NotificationService.create_notification(
-        uid,
-        'ACCOUNT_CREATED',
-        {'userName': name}
-    )
-    
-    # ✅ NOTIFY TTC if innovator was created
-    if role == 'innovator' and user_doc.get('ttcCoordinatorId'):
+    try:
         NotificationService.create_notification(
-            user_doc['ttcCoordinatorId'],
-            'NEW_INNOVATOR_ASSIGNED',
-            {'innovatorName': name}
+            str(uid),  # ✅ Convert to string
+            'ACCOUNT_CREATED',
+            data={'userName': name}  # ✅ Use data dict
         )
+    except Exception as e:
+        print(f"Notification failed: {e}")
+    
+    # ✅ NOTIFY TTC if innovator/individual_innovator was created
+    if role in ['innovator', 'individual_innovator'] and user_doc.get('ttcCoordinatorId'):
+        try:
+            NotificationService.create_notification(
+                str(user_doc['ttcCoordinatorId']),  # ✅ Convert to string
+                'NEW_INNOVATOR_ASSIGNED',
+                data={'innovatorName': name}  # ✅ Use data dict
+            )
+        except Exception as e:
+            print(f"Notification failed: {e}")
     
     # Send welcome email
     try:
@@ -198,9 +223,11 @@ def create_user():
             current_app.config['SENDER_EMAIL'],
             current_app.config['AWS_REGION']
         )
+        
         subject, html_body = email_service.build_welcome_email(
             role, name, email, temp_password
         )
+        
         email_service.send_email(email, subject, html_body)
     except Exception as e:
         print(f"Email sending failed: {e}")
@@ -208,16 +235,17 @@ def create_user():
     return jsonify({
         "success": True,
         "message": "User created successfully",
-        "userId": uid,
-        "tempPassword": temp_password  # Return for manual sharing if email fails
+        "userId": str(uid),  # ✅ Convert to string
+        "tempPassword": temp_password
     }), 201
 
 
 # -------------------------------------------------------------------------
 # 5. UPDATE USER - Edit user profile
 # -------------------------------------------------------------------------
-@users_bp.route('/<uid>', methods=['PUT'])
-@requires_auth
+
+@users_bp.route('/<uid>', methods=['PUT'])  # ✅ Fixed route with <uid>
+@requires_auth()
 def update_user(uid):
     """Update user profile"""
     caller_id = request.user_id
@@ -228,6 +256,7 @@ def update_user(uid):
         **normalize_user_id(uid),
         "isDeleted": {"$ne": True}
     })
+    
     if not target:
         return jsonify({"error": "User not found"}), 404
     
@@ -241,9 +270,9 @@ def update_user(uid):
     elif caller_role == 'college_admin':
         ok = (uid == caller_id or target_college == caller_id)
     elif caller_role == 'ttc_coordinator':
-        ok = (uid == caller_id or 
+        ok = (uid == caller_id or
               (target_role == 'innovator' and target.get('createdBy') == caller_id))
-    elif caller_role in ['innovator', 'internal_mentor', 'mentor', 'team_member']:
+    elif caller_role in ['innovator', 'individual_innovator', 'internal_mentor', 'mentor', 'team_member']:
         ok = (uid == caller_id)
     else:
         return jsonify({"error": "Access denied"}), 403
@@ -271,6 +300,7 @@ def update_user(uid):
                 current_app.config['AWS_REGION'],
                 current_app.config.get('MAX_CONTENT_LENGTH', 10 * 1024 * 1024)
             )
+            
             ext = file.filename.rsplit('.', 1)[-1].lower()
             if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp']:
                 image_url = s3_service.upload_file(file, 'profiles')
@@ -278,9 +308,9 @@ def update_user(uid):
     
     # Build update document
     update_fields = {}
-    allowed_fields = ['name', 'email', 'phone', 'bio', 'profileImage', 
-                      'department', 'year', 'college', 'interests', 
-                      'expertise', 'designation', 'organization']
+    allowed_fields = ['name', 'email', 'phone', 'bio', 'profileImage',
+                     'department', 'year', 'college', 'interests',
+                     'expertise', 'designation', 'organization']
     
     for field in allowed_fields:
         if field in payload:
@@ -313,7 +343,8 @@ def update_user(uid):
 # -------------------------------------------------------------------------
 # 6. DELETE USER - Soft delete user
 # -------------------------------------------------------------------------
-@users_bp.route('/<uid>', methods=['DELETE'])
+
+@users_bp.route('/<uid>', methods=['DELETE'])  # ✅ Fixed route with <uid>
 @requires_role(['super_admin', 'college_admin'])
 def delete_user(uid):
     """Soft delete user"""
@@ -325,6 +356,7 @@ def delete_user(uid):
         **normalize_user_id(uid),
         "isDeleted": {"$ne": True}
     })
+    
     if not target:
         return jsonify({"error": "User not found"}), 404
     
@@ -336,13 +368,11 @@ def delete_user(uid):
     # Soft delete
     users_coll.update_one(
         normalize_user_id(uid),
-        {
-            "$set": {
-                "isDeleted": True,
-                "deletedAt": datetime.now(timezone.utc),
-                "deletedBy": caller_id
-            }
-        }
+        {"$set": {
+            "isDeleted": True,
+            "deletedAt": datetime.now(timezone.utc),
+            "deletedBy": caller_id
+        }}
     )
     
     return jsonify({
@@ -354,8 +384,9 @@ def delete_user(uid):
 # -------------------------------------------------------------------------
 # 7. ACTIVATE USER - First-time user activation
 # -------------------------------------------------------------------------
-@users_bp.route('/<uid>/activate', methods=['POST'])
-@requires_auth
+
+@users_bp.route('/<uid>/activate', methods=['POST'])  # ✅ Fixed route with <uid>
+@requires_auth(allow_inactive=True)
 def activate_user(uid):
     """Activate user account (first login)"""
     if request.user_id != uid:
@@ -363,12 +394,10 @@ def activate_user(uid):
     
     users_coll.update_one(
         normalize_user_id(uid),
-        {
-            "$set": {
-                "isActive": True,
-                "activatedAt": datetime.now(timezone.utc)
-            }
-        }
+        {"$set": {
+            "isActive": True,
+            "activatedAt": datetime.now(timezone.utc)
+        }}
     )
     
     return jsonify({
@@ -380,7 +409,8 @@ def activate_user(uid):
 # -------------------------------------------------------------------------
 # 8. TOGGLE USER ACTIVE STATUS
 # -------------------------------------------------------------------------
-@users_bp.route('/<uid>/toggle-active', methods=['PUT'])
+
+@users_bp.route('/<uid>/toggle-active', methods=['PUT'])  # ✅ Fixed route with <uid>
 @requires_role(['super_admin', 'college_admin'])
 def toggle_user_active(uid):
     """Toggle user active/inactive status"""
@@ -409,6 +439,7 @@ def toggle_user_active(uid):
 # -------------------------------------------------------------------------
 # 9. GET USER STATISTICS - Dashboard stats
 # -------------------------------------------------------------------------
+
 @users_bp.route('/stats/summary', methods=['GET'])
 @requires_role(['college_admin', 'ttc_coordinator', 'super_admin'])
 def get_user_stats():
@@ -461,7 +492,7 @@ def get_user_stats():
 # =========================================================================
 
 @users_bp.route('/available-mentors', methods=['GET'])
-@requires_role(['innovator'])
+@requires_role(['innovator', 'individual_innovator'])
 def get_available_mentors():
     """
     Innovator views internal mentors from their TTC coordinator
@@ -474,11 +505,13 @@ def get_available_mentors():
         **normalize_user_id(caller_id),
         "isDeleted": {"$ne": True}
     })
+    
     if not innovator:
         return jsonify({"error": "User not found"}), 404
     
     # Get innovator's TTC coordinator ID
     ttc_id = innovator.get('ttcCoordinatorId')
+    
     if not ttc_id:
         return jsonify({
             "success": True,
@@ -506,7 +539,6 @@ def get_available_mentors():
     # Add optional filters
     if department:
         query['department'] = department
-    
     if expertise:
         query['expertise'] = expertise
     
@@ -529,7 +561,7 @@ def get_available_mentors():
         "success": True,
         "data": mentors,
         "meta": {
-            "ttcCoordinatorId": ttc_id,
+            "ttcCoordinatorId": str(ttc_id),
             "ttcCoordinatorName": ttc_name,
             "totalMentors": total
         },
@@ -546,7 +578,7 @@ def get_available_mentors():
 # GET INNOVATORS FOR SPECIFIC TTC - College Admin / TTC View
 # =========================================================================
 
-@users_bp.route('/ttc/<ttc_id>/innovators', methods=['GET'])
+@users_bp.route('/ttc/<ttc_id>/innovators', methods=['GET'])  # ✅ Fixed route with <ttc_id>
 @requires_role(['college_admin', 'ttc_coordinator', 'super_admin'])
 def get_ttc_innovators(ttc_id):
     """
@@ -568,6 +600,7 @@ def get_ttc_innovators(ttc_id):
             "role": "ttc_coordinator",
             **normalize_any_id_field("collegeId", caller_id)
         })
+        
         if not ttc:
             return jsonify({"error": "TTC not found or access denied"}), 404
     
@@ -578,7 +611,7 @@ def get_ttc_innovators(ttc_id):
     
     # Get innovators created by this TTC
     query = {
-        "role": "innovator",
+        "role": {"$in": ["innovator", "individual_innovator"]},
         **normalize_any_id_field("createdBy", ttc_id),
         "isDeleted": {"$ne": True}
     }
@@ -627,9 +660,10 @@ def get_ttc_innovators(ttc_id):
     
     return jsonify({
         "success": True,
+
         "data": innovators,
         "meta": {
-            "ttcId": ttc_id,
+            "ttcId": str(ttc_id),
             "ttcName": ttc_doc.get('name') if ttc_doc else 'Unknown',
             "ttcEmail": ttc_doc.get('email') if ttc_doc else '',
             "totalInnovators": total
@@ -641,3 +675,62 @@ def get_ttc_innovators(ttc_id):
             "pages": (total + limit - 1) // limit
         }
     }), 200
+# Add this endpoint to app/routes/users.py
+
+@users_bp.route('/mentors', methods=['GET'])
+@requires_auth
+def get_external_mentors():
+    """
+    Get all active external mentors
+    """
+    print("="*80)
+    print("FETCHING EXTERNAL MENTORS")
+    
+    try:
+        # Query for active mentors
+        mentors = users_coll.find(
+            {
+                "role": "mentor",
+                "isDeleted": {"$ne": True},
+                "isActive": True
+            },
+            {
+                "_id": 1,
+                "name": 1,
+                "email": 1,
+                "organization": 1,
+                "expertise": 1,
+                "bio": 1
+            }
+        ).sort("name", 1)
+        
+        mentors_list = []
+        for mentor in mentors:
+            mentors_list.append({
+                "id": str(mentor['_id']),
+                "name": mentor.get('name', 'Unknown'),
+                "email": mentor.get('email', ''),
+                "organization": mentor.get('organization', ''),
+                "expertise": mentor.get('expertise', []),
+                "bio": mentor.get('bio', '')
+            })
+        
+        print(f"✅ Found {len(mentors_list)} external mentors")
+        print("="*80)
+        
+        return jsonify({
+            "success": True,
+            "data": mentors_list,
+            "count": len(mentors_list)
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error fetching mentors: {e}")
+        import traceback
+        traceback.print_exc()
+        print("="*80)
+        
+        return jsonify({
+            "error": "Failed to fetch mentors",
+            "message": str(e)
+        }), 500

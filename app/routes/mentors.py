@@ -22,7 +22,7 @@ mentor_requests_coll = db['mentor_requests']
 # 1. INNOVATOR REQUESTS MENTOR FOR IDEA
 # =========================================================================
 @mentors_bp.route('/request', methods=['POST'])
-@requires_role(['innovator'])
+@requires_role(['innovator', 'individual_innovator'])
 def request_mentor():
     """
     Innovator sends mentor request
@@ -377,8 +377,8 @@ def get_mentor_ideas():
     
     # Find ideas where mentorId matches
     query = {
-        "mentorId": mentor_id,
-        "isDeleted": {"$ne": True}
+        **normalize_any_id_field('consultationMentorId', mentor_id),  # NEW
+        'isDeleted': {'$ne': True}
     }
     
     # Get total count
@@ -405,7 +405,7 @@ def get_mentor_ideas():
 # 6. LIST COLLEGE MENTORS
 # =========================================================================
 @mentors_bp.route("/", methods=["GET"], strict_slashes=False)
-@requires_role(['college_admin', 'ttc_coordinator', 'innovator'])
+@requires_role(['college_admin', 'ttc_coordinator', 'innovator', 'individual_innovator'])
 def list_college_mentors():
     """List internal mentors for caller's college"""
     print("=" * 80)
@@ -624,3 +624,448 @@ def toggle_external_mentor_status(mentor_id):
         'message': f'Mentor {"activated" if new_status else "deactivated"} successfully',
         'isActive': new_status
     }), 200
+
+@mentors_bp.route('/dashboard/stats', methods=['GET'])
+@requires_role(['mentor'])
+def get_mentor_dashboard_stats():
+    """
+    Get comprehensive dashboard statistics for external mentor
+    Returns:
+    - Assigned ideas count
+    - Assigned innovators count (includes team members)
+    - Upcoming consultations count
+    - Completed consultations count
+    """
+    mentor_id = request.user_id
+    
+    try:
+        # 1. Count assigned ideas where mentor is assigned
+        assigned_ideas_count = ideas_coll.count_documents({
+            **normalize_any_id_field('consultationMentorId', mentor_id),
+            'isDeleted': {'$ne': True}
+        })
+        
+        # 2. Get unique innovators + team members from assigned ideas
+        ideas_cursor = ideas_coll.find(
+            {
+                **normalize_any_id_field('consultationMentorId', mentor_id),
+                'isDeleted': {'$ne': True}
+            },
+            {'innovatorId': 1, 'coreTeamIds': 1}
+        )
+        
+        unique_innovator_ids = set()
+        for idea in ideas_cursor:
+            # Add main innovator
+            if idea.get('innovatorId'):
+                unique_innovator_ids.add(str(idea['innovatorId']))
+            
+            # Add team members
+            if idea.get('coreTeamIds'):
+                for team_id in idea['coreTeamIds']:
+                    unique_innovator_ids.add(str(team_id))
+        
+        assigned_innovators_count = len(unique_innovator_ids)
+        
+        # 3. Count consultations by status
+        now = datetime.now(timezone.utc)
+        
+        # Upcoming consultations (future date + assigned/rescheduled status)
+        upcoming_consultations = ideas_coll.count_documents({
+            **normalize_any_id_field('consultationMentorId', mentor_id),
+            'consultationScheduledAt': {'$gte': now},
+            'consultationStatus': {'$in': ['assigned', 'rescheduled']},
+            'isDeleted': {'$ne': True}
+        })
+        
+        # Completed consultations
+        completed_consultations = ideas_coll.count_documents({
+            **normalize_any_id_field('consultationMentorId', mentor_id),
+            'consultationStatus': 'completed',
+            'isDeleted': {'$ne': True}
+        })
+        
+        print(f"📊 Mentor Dashboard Stats:")
+        print(f"   - Assigned Ideas: {assigned_ideas_count}")
+        print(f"   - Assigned Innovators: {assigned_innovators_count}")
+        print(f"   - Upcoming Consultations: {upcoming_consultations}")
+        print(f"   - Completed Consultations: {completed_consultations}")
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'assignedIdeas': assigned_ideas_count,
+                'assignedInnovators': assigned_innovators_count,
+                'consultations': {
+                    'upcoming': upcoming_consultations,
+                    'completed': completed_consultations,
+                    'total': upcoming_consultations + completed_consultations
+                }
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error in mentor dashboard stats: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': 'Failed to fetch dashboard stats',
+            'message': str(e)
+        }), 500
+
+# =========================================================================
+# INNOVATORS MANAGEMENT FOR EXTERNAL MENTORS
+# =========================================================================
+
+@mentors_bp.route('/assigned-innovators', methods=['GET'])
+@requires_role(['mentor'])
+def get_assigned_innovators():
+    """
+    Get list of all innovators (and team members) whose ideas are assigned to this mentor
+    Includes stats: ideas mentored count and average score
+    """
+    mentor_id = request.user_id
+    
+    try:
+        # Get all ideas assigned to this mentor
+        ideas_cursor = ideas_coll.find(
+            {
+                **normalize_any_id_field('consultationMentorId', mentor_id),
+                'isDeleted': {'$ne': True}
+            },
+            {
+                'innovatorId': 1, 
+                'coreTeamIds': 1, 
+                'overallScore': 1,
+                'title': 1
+            }
+        )
+        
+        # Collect innovator IDs and their idea stats
+        innovator_stats_map = {}  # innovator_id -> {ideas: [], scores: []}
+        
+        for idea in ideas_cursor:
+            main_innovator_id = str(idea['innovatorId'])
+            
+            # Track main innovator
+            if main_innovator_id not in innovator_stats_map:
+                innovator_stats_map[main_innovator_id] = {
+                    'ideas': [],
+                    'scores': [],
+                    'isTeamMember': False
+                }
+            
+            innovator_stats_map[main_innovator_id]['ideas'].append({
+                'id': str(idea['_id']),
+                'title': idea.get('title', 'Untitled')
+            })
+            
+            if idea.get('overallScore'):
+                innovator_stats_map[main_innovator_id]['scores'].append(idea['overallScore'])
+            
+            # Track team members
+            for team_member_id in idea.get('coreTeamIds', []):
+                team_member_id_str = str(team_member_id)
+                if team_member_id_str not in innovator_stats_map:
+                    innovator_stats_map[team_member_id_str] = {
+                        'ideas': [],
+                        'scores': [],
+                        'isTeamMember': True
+                    }
+                
+                innovator_stats_map[team_member_id_str]['ideas'].append({
+                    'id': str(idea['_id']),
+                    'title': idea.get('title', 'Untitled')
+                })
+                
+                if idea.get('overallScore'):
+                    innovator_stats_map[team_member_id_str]['scores'].append(idea['overallScore'])
+        
+        # Fetch user details for all innovators
+        innovator_ids = [ObjectId(uid) for uid in innovator_stats_map.keys()]
+        
+        if not innovator_ids:
+            return jsonify({
+                'success': True,
+                'data': [],
+                'total': 0
+            }), 200
+        
+        users_cursor = users_coll.find(
+            {'_id': {'$in': innovator_ids}},
+            {'password': 0}
+        )
+        
+        innovators = []
+        for user in users_cursor:
+            user_id_str = str(user['_id'])
+            stats_data = innovator_stats_map[user_id_str]
+            
+            # Calculate average score
+            scores = stats_data['scores']
+            avg_score = sum(scores) / len(scores) if scores else 0
+            
+            # Get college info
+            college_info = None
+            if user.get('collegeId'):
+                college = find_user(user['collegeId'])
+                if college:
+                    college_info = {
+                        'id': str(college['_id']),
+                        'name': college.get('collegeName', 'Unknown')
+                    }
+            
+            innovator_data = clean_doc(user)
+            innovator_data['college'] = college_info
+            innovator_data['stats'] = {
+                'ideasMentored': len(stats_data['ideas']),
+                'averageScore': round(avg_score, 1)
+            }
+            innovator_data['isTeamMember'] = stats_data['isTeamMember']
+            
+            innovators.append(innovator_data)
+        
+        # Sort by name
+        innovators.sort(key=lambda x: x.get('name', ''))
+        
+        print(f"📊 Found {len(innovators)} innovators for mentor {mentor_id}")
+        
+        return jsonify({
+            'success': True,
+            'data': innovators,
+            'total': len(innovators)
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error in get_assigned_innovators: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': 'Failed to fetch assigned innovators',
+            'message': str(e)
+        }), 500
+
+
+@mentors_bp.route('/innovators/<innovator_id>', methods=['GET'])
+@requires_role(['mentor'])
+def get_innovator_detail(innovator_id):
+    """
+    Get detailed information about a specific innovator
+    Includes:
+    - Profile details
+    - List of ideas mentored by this mentor for this innovator
+    - Consultation history
+    """
+    mentor_id = request.user_id
+    
+    try:
+        # Get innovator details
+        innovator = find_user(innovator_id)
+        
+        if not innovator:
+            return jsonify({'error': 'Innovator not found'}), 404
+        
+        # Get college info
+        college_info = None
+        if innovator.get('collegeId'):
+            college = find_user(innovator['collegeId'])
+            if college:
+                college_info = {
+                    'id': str(college['_id']),
+                    'name': college.get('collegeName', 'Unknown')
+                }
+        
+        # Build profile response
+        profile = clean_doc(innovator)
+        profile['college'] = college_info
+        
+        # Get ideas mentored by this mentor for this innovator
+        # Check if innovator is main innovator OR team member
+        ideas_query = {
+            '$or': [
+                {
+                    **normalize_any_id_field('innovatorId', innovator_id),
+                    **normalize_any_id_field('consultationMentorId', mentor_id),
+                },
+                {
+                    **normalize_any_id_field('coreTeamIds', innovator_id),
+                    **normalize_any_id_field('consultationMentorId', mentor_id),
+                }
+            ],
+            'isDeleted': {'$ne': True}
+        }
+        
+        ideas_cursor = ideas_coll.find(
+            ideas_query,
+            {
+                'title': 1,
+                'submittedAt': 1,
+                'status': 1,
+                'overallScore': 1,
+                'domain': 1,
+                'consultationScheduledAt': 1,
+                'consultationStatus': 1,
+                'createdAt': 1
+            }
+        ).sort('submittedAt', -1)
+        
+        mentored_ideas = []
+        consultation_history = []
+        
+        for idea in ideas_cursor:
+            # Add to mentored ideas
+            idea_data = clean_doc(idea)
+            idea_data['submittedAt'] = idea.get('submittedAt') or idea.get('createdAt')
+            mentored_ideas.append(idea_data)
+            
+            # Add to consultation history if consultation exists
+            if idea.get('consultationScheduledAt'):
+                consultation_data = {
+                    '_id': str(idea['_id']),
+                    'ideaId': str(idea['_id']),
+                    'ideaTitle': idea.get('title', 'Untitled'),
+                    'scheduledAt': idea.get('consultationScheduledAt'),
+                    'status': idea.get('consultationStatus', 'assigned')
+                }
+                consultation_history.append(consultation_data)
+        
+        # Sort consultation history by date (most recent first)
+        consultation_history.sort(
+            key=lambda x: x.get('scheduledAt') or datetime.min,
+            reverse=True
+        )
+        
+        print(f"📊 Innovator {innovator_id} details:")
+        print(f"   - Mentored Ideas: {len(mentored_ideas)}")
+        print(f"   - Consultations: {len(consultation_history)}")
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'profile': profile,
+                'mentoredIdeas': mentored_ideas,
+                'consultationHistory': consultation_history
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error in get_innovator_detail: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': 'Failed to fetch innovator details',
+            'message': str(e)
+        }), 500
+
+# =========================================================================
+# CONSULTATIONS FOR EXTERNAL MENTORS
+# =========================================================================
+
+@mentors_bp.route('/consultations', methods=['GET'])
+@requires_role(['mentor'])
+def get_mentor_consultations():
+    """
+    Get all consultations for external mentor
+    Query params:
+    - filter: 'upcoming', 'past', 'all' (default: 'all')
+    - page: page number (default: 1)
+    - limit: items per page (default: 50)
+    """
+    mentor_id = request.user_id
+    filter_type = request.args.get('filter', 'all')
+    page = int(request.args.get('page', 1))
+    limit = int(request.args.get('limit', 50))
+    skip = (page - 1) * limit
+    
+    try:
+        # Base query: ideas where this mentor is assigned
+        base_query = {
+            **normalize_any_id_field('consultationMentorId', mentor_id),
+            'consultationScheduledAt': {'$exists': True, '$ne': None},  # Has consultation
+            'isDeleted': {'$ne': True}
+        }
+        
+        now = datetime.now(timezone.utc)
+        
+        # Apply filter
+        if filter_type == 'upcoming':
+            # Future consultations that are scheduled/assigned/rescheduled
+            base_query['$and'] = [
+                {'consultationScheduledAt': {'$gte': now}},
+                {'consultationStatus': {'$in': ['assigned', 'scheduled', 'rescheduled']}}
+            ]
+        elif filter_type == 'past':
+            # Past consultations OR completed/cancelled status
+            base_query['$or'] = [
+                {'consultationScheduledAt': {'$lt': now}},
+                {'consultationStatus': {'$in': ['completed', 'cancelled']}}
+            ]
+        
+        # Get total count
+        total = ideas_coll.count_documents(base_query)
+        
+        # Get consultations with idea details
+        consultations_cursor = ideas_coll.find(
+            base_query,
+            {
+                '_id': 1,
+                'title': 1,
+                'innovatorId': 1,
+                'innovatorName': 1,
+                'consultationScheduledAt': 1,
+                'consultationStatus': 1,
+                'consultationNotes': 1,
+                'consultationMentorName': 1,
+                'domain': 1,
+                'overallScore': 1
+            }
+        ).sort('consultationScheduledAt', -1 if filter_type == 'past' else 1).skip(skip).limit(limit)
+        
+        consultations = []
+        for idea in consultations_cursor:
+            # Get innovator details if not in idea
+            innovator_name = idea.get('innovatorName')
+            if not innovator_name and idea.get('innovatorId'):
+                innovator = find_user(idea['innovatorId'])
+                innovator_name = innovator.get('name', 'Unknown') if innovator else 'Unknown'
+            
+            consultation_data = {
+                '_id': str(idea['_id']),
+                'ideaId': str(idea['_id']),
+                'ideaTitle': idea.get('title', 'Untitled'),
+                'innovatorName': innovator_name or 'Unknown',
+                'scheduledAt': idea.get('consultationScheduledAt'),
+                'date': idea['consultationScheduledAt'].strftime('%Y-%m-%d') if idea.get('consultationScheduledAt') else None,
+                'time': idea['consultationScheduledAt'].strftime('%H:%M') if idea.get('consultationScheduledAt') else None,
+                'status': idea.get('consultationStatus', 'assigned'),
+                'notes': idea.get('consultationNotes', ''),
+                'domain': idea.get('domain', ''),
+                'overallScore': idea.get('overallScore')
+            }
+            
+            consultations.append(consultation_data)
+        
+        print(f"📅 Mentor Consultations ({filter_type}):")
+        print(f"   - Total: {total}")
+        print(f"   - Returned: {len(consultations)}")
+        
+        return jsonify({
+            'success': True,
+            'data': consultations,
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total,
+                'pages': (total + limit - 1) // limit
+            },
+            'filter': filter_type
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error in get_mentor_consultations: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': 'Failed to fetch consultations',
+            'message': str(e)
+        }), 500

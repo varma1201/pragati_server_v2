@@ -1,12 +1,17 @@
 from flask import Blueprint, request, jsonify, current_app
-from app.database.mongo import users_coll
+from app.database.mongo import users_coll, otp_coll 
 from app.services.auth_service import AuthService
 from app.middleware.auth import requires_auth
 from app.utils.validators import clean_doc
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 from app.utils.validators import normalize_user_id
 from app.utils.id_helpers import find_user
+from app.services.audit_service import AuditService
+import secrets  
+import json 
+from app.services.email_service import EmailService
+from app.services.notification_service import NotificationService 
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
@@ -467,3 +472,483 @@ def get_colleges():
             "error": "Failed to fetch colleges",
             "message": str(e)
         }), 500
+
+
+
+# ============================================================================
+# PUBLIC SIGNUP - EXTERNAL MENTOR & INDIVIDUAL INNOVATOR
+# ============================================================================
+
+@auth_bp.route('/signup/public', methods=['POST'])
+def public_signup():
+    """
+    Public self-registration for:
+    1. External Mentors (role: "mentor") - with bio/CV
+    2. Individual Innovators (role: "individual_innovator") - independent users
+    
+    Flow:
+    1. Validate input + check email uniqueness
+    2. User is created with isActive=False
+    3. Super Admin must activate the account
+    
+    Returns:
+        - userId, message
+    """
+    print("="*80)
+    print("🌐 PUBLIC SIGNUP - Starting registration")
+    print("="*80)
+    
+    try:
+        from app.services.s3_service import S3Service
+        
+        # Parse request (handle multipart for file upload)
+        if request.content_type and 'multipart' in request.content_type:
+            data = json.loads(request.form.get('json', '{}'))
+            bio_file = request.files.get('bio')
+        else:
+            data = request.get_json(force=True)
+            bio_file = None
+        
+        # ----------------------------------------------------------------
+        # STEP 1: Extract fields
+        # ----------------------------------------------------------------
+        role = data.get('role', '').strip()  # "mentor" or "individual_innovator"
+        first_name = data.get('firstName', '').strip()
+        last_name = data.get('lastName', '').strip()
+        email = data.get('email', '').strip().lower()
+        phone = data.get('phone', '').strip()
+        password = data.get('password', '')
+        otp_code = data.get('otp', '')
+        
+        # Mentor-specific fields
+        expertise_category = data.get('expertiseCategory', '').strip()
+        expertise_sub_category = data.get('expertiseSubCategory', '').strip()
+        
+        print(f"📝 Role: {role}")
+        print(f"📝 Name: {first_name} {last_name}")
+        print(f"📝 Email: {email}")
+        print(f"📝 Phone: {phone}")
+        
+        # ----------------------------------------------------------------
+        # STEP 2: Validation
+        # ----------------------------------------------------------------
+        if role not in ['mentor', 'individual_innovator']:
+            return jsonify({"error": "Invalid role. Must be 'mentor' or 'individual_innovator'"}), 400
+        
+        required_fields = ['firstName', 'lastName', 'email', 'phone', 'password', 'otp']
+        for field in required_fields:
+            if not data.get(field):
+                return jsonify({"error": f"{field} is required"}), 400
+        
+        if role == 'mentor':
+            if not expertise_category:
+                return jsonify({"error": "expertiseCategory is required for mentors"}), 400
+            if not bio_file:
+                return jsonify({"error": "bio/CV file is required for mentors"}), 400
+        
+        # ----------------------------------------------------------------
+        # STEP 3: Verify OTP
+        # ----------------------------------------------------------------
+        print(f"🔐 Verifying OTP for email: {email}")
+        
+        otp_record = otp_coll.find_one({
+            "email": email,
+            "code": otp_code,
+            "used": False,
+            "expiresAt": {"$gte": datetime.now(timezone.utc)}
+        })
+        
+        if not otp_record:
+            print("❌ OTP verification failed")
+            return jsonify({"error": "Invalid or expired OTP"}), 401
+        
+        print("✅ OTP verified successfully")
+        
+        # Mark OTP as used
+        otp_coll.update_one(
+            {"_id": otp_record['_id']},
+            {"$set": {"used": True, "usedAt": datetime.now(timezone.utc)}}
+        )
+        
+        # ----------------------------------------------------------------
+        # STEP 4: Check email uniqueness
+        # ----------------------------------------------------------------
+        if users_coll.find_one({"email": email}):
+            print(f"❌ Email already exists: {email}")
+            return jsonify({"error": "Email already registered"}), 409
+        
+        # ----------------------------------------------------------------
+        # STEP 5: Upload Bio/CV to S3 (if mentor)
+        # ----------------------------------------------------------------
+        bio_url = None
+        bio_key = None
+        
+        if role == 'mentor' and bio_file:
+            print("📤 Uploading bio/CV to S3...")
+            
+            s3_service = S3Service(
+                current_app.config['S3_BUCKET'],
+                current_app.config['AWS_ACCESS_KEY_ID'],
+                current_app.config['AWS_SECRET_ACCESS_KEY'],
+                current_app.config['AWS_REGION'],
+                current_app.config.get('MAX_CONTENT_LENGTH', 10 * 1024 * 1024)
+            )
+            
+            try:
+                bio_key = s3_service.upload_file(bio_file, folder='mentor-bios')
+                bio_url = f"https://{current_app.config['S3_BUCKET']}.s3.{current_app.config['AWS_REGION']}.amazonaws.com/{bio_key}"
+                print(f"✅ Bio uploaded: {bio_key}")
+            except Exception as e:
+                print(f"❌ S3 upload failed: {e}")
+                return jsonify({"error": "Failed to upload bio/CV"}), 500
+        
+        # ----------------------------------------------------------------
+        # STEP 6: Hash password
+        # ----------------------------------------------------------------
+        auth_service = AuthService(current_app.config['JWT_SECRET'])
+        hashed_password = auth_service.hash_password(password)
+        
+        # ----------------------------------------------------------------
+        # STEP 7: Create user document
+        # ----------------------------------------------------------------
+        user_id = ObjectId()
+        full_name = f"{first_name} {last_name}"
+        
+        user_doc = {
+            "_id": user_id,
+            "name": full_name,
+            "firstName": first_name,
+            "lastName": last_name,
+            "email": email,
+            "phone": phone,
+            "password": hashed_password,
+            "role": role,
+            "isActive": True,  # ⚠️ INACTIVE until Super Admin approves
+            "isDeleted": False,
+            "emailVerified": True,  # OTP verified
+            "createdAt": datetime.now(timezone.utc),
+            "updatedAt": datetime.now(timezone.utc),
+            "createdBy": None,  # Self-registered
+            "approvedBy": None,  # Will be set when Super Admin approves
+            "approvedAt": None
+        }
+        
+        # Add role-specific fields
+        if role == 'mentor':
+            user_doc.update({
+                "expertiseCategory": expertise_category,
+                "expertiseSubCategory": expertise_sub_category,
+                "bioFileUrl": bio_url,
+                "bioFileKey": bio_key,
+                "organization": "",  # Can be updated later
+                "designation": "",   # Can be updated later
+                "consultationsCount": 0
+            })
+        elif role == 'individual_innovator':
+            user_doc.update({
+                "ttcCoordinatorId": None,  # No TTC
+                "collegeId": None,         # No college
+                "creditQuota": 0,          # No initial credits
+                "isPsychometricAnalysisDone": False,
+                "domain": "",
+                "interests": []
+            })
+        
+        # ----------------------------------------------------------------
+        # STEP 8: Insert user
+        # ----------------------------------------------------------------
+        users_coll.insert_one(user_doc)
+        print(f"✅ User created: {user_id}")
+        
+        # ----------------------------------------------------------------
+        # STEP 9: Send welcome email
+        # ----------------------------------------------------------------
+        try:
+            email_service = EmailService(
+                current_app.config['SENDER_EMAIL'],
+                current_app.config['AWS_REGION']
+            )
+            
+            subject = "Welcome to Pragati - Account Pending Approval"
+            html_body = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+            </head>
+            <body style="margin: 0; padding: 20px; font-family: Arial, sans-serif; background-color: #f5f5f5;">
+                <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; padding: 30px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <div style="text-align: center; margin-bottom: 30px;">
+                        <h1 style="color: #667eea; margin: 0;">Welcome to Pragati!</h1>
+                    </div>
+                    
+                    <p style="font-size: 16px; color: #333;">Hello <strong>{full_name}</strong>,</p>
+                    
+                    <p style="font-size: 15px; color: #555; line-height: 1.6;">
+                        Thank you for registering as a <strong>{"External Mentor" if role == "mentor" else "Individual Innovator"}</strong> 
+                        on the Pragati Innovation Platform.
+                    </p>
+                    
+                    <div style="background: #fef3c7; padding: 15px; border-radius: 6px; border-left: 4px solid #f59e0b; margin: 20px 0;">
+                        <strong style="color: #92400e;">⏳ Account Pending Approval</strong><br>
+                        <span style="color: #92400e; font-size: 14px;">
+                            Your account is currently under review by our administrators. 
+                            You'll receive an email once your account is activated.
+                        </span>
+                    </div>
+                    
+                    <div style="background: #f9fafb; padding: 20px; border-radius: 8px; margin: 25px 0; border: 2px solid #667eea;">
+                        <h3 style="color: #667eea; margin-top: 0;">Account Details</h3>
+                        <p style="margin: 10px 0;"><strong style="color: #667eea;">Email:</strong><br>
+                            <span style="font-family: monospace; font-size: 14px;">{email}</span>
+                        </p>
+                        <p style="margin: 10px 0;"><strong style="color: #667eea;">Role:</strong><br>
+                            <span style="font-size: 14px;">{"External Mentor" if role == "mentor" else "Individual Innovator"}</span>
+                        </p>
+                        {"<p style='margin: 10px 0;'><strong style='color: #667eea;'>Expertise:</strong><br><span style='font-size: 14px;'>" + expertise_category + ("/" + expertise_sub_category if expertise_sub_category else "") + "</span></p>" if role == "mentor" else ""}
+                    </div>
+                    
+                    <div style="background: white; padding: 20px; border-radius: 8px; margin: 25px 0; border: 1px solid #e5e7eb;">
+                        <h3 style="color: #667eea; margin-top: 0;">What Happens Next?</h3>
+                        <ol style="padding-left: 20px; color: #555;">
+                            <li style="margin: 10px 0;">Our team will review your registration</li>
+                            <li style="margin: 10px 0;">You'll receive an email notification once approved</li>
+                            <li style="margin: 10px 0;">After approval, you can log in and start using the platform</li>
+                        </ol>
+                    </div>
+                    
+                    <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb; text-align: center;">
+                        <p style="font-size: 12px; color: #999; margin: 5px 0;">Pragati Innovation Platform</p>
+                        <p style="font-size: 12px; color: #999; margin: 5px 0;">
+                            If you have any questions, please contact support.
+                        </p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            email_service.send_email(email, subject, html_body)
+            print(f"✅ Welcome email sent to {email}")
+        except Exception as e:
+            print(f"⚠️ Email sending failed: {e}")
+            # Don't fail registration if email fails
+        
+        # ----------------------------------------------------------------
+        # STEP 10: Notify Super Admins
+        # ----------------------------------------------------------------
+        try:
+            super_admins = users_coll.find({"role": "super_admin", "isActive": True})
+            for admin in super_admins:
+                NotificationService.create_notification(
+                    str(admin['_id']),
+                    "NEW_REGISTRATION",
+                    userName=full_name,
+                    userEmail=email,
+                    userRole=role,
+                    userId=str(user_id)
+                )
+            print(f"✅ Super admins notified about new registration")
+        except Exception as e:
+            print(f"⚠️ Admin notification failed: {e}")
+        
+        print("="*80)
+        print(f"✅ PUBLIC SIGNUP SUCCESS - {role.upper()}")
+        print("="*80)
+        
+        return jsonify({
+            "success": True,
+            "message": f"Account created successfully! Your registration is pending approval from administrators.",
+            "userId": str(user_id),
+            "email": email,
+            "role": role,
+            "status": "pending_approval"
+        }), 201
+        
+    except Exception as e:
+        print("="*80)
+        print("❌ PUBLIC SIGNUP ERROR")
+        print("="*80)
+        print(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Registration failed", "message": str(e)}), 500
+
+
+# ============================================================================
+# EMAIL OTP - SEND
+# ============================================================================
+
+@auth_bp.route('/otp/send', methods=['POST'])
+def send_otp():
+    """
+    Send 6-digit OTP to email for verification
+    
+    Request:
+        {
+          "email": "user@example.com"
+        }
+    
+    Returns:
+        - success, message
+    """
+    print("📧 SEND OTP - Request: ", request.json)
+    print("="*80)
+    print("📧 SEND OTP - Starting")
+    print("="*80)
+    try:
+        body = request.get_json(force=True)
+        email = body.get('email', '').strip().lower()
+        
+        if not email:
+            return jsonify({"error": "Email is required"}), 400
+        
+        print(f"📧 Email: {email}")
+        
+        # Check if email already exists
+        if users_coll.find_one({"email": email}):
+            print(f"❌ Email already registered: {email}")
+            return jsonify({"error": "Email already registered"}), 409
+        
+        # Generate 6-digit OTP
+        otp_code = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
+        print(f"🔐 Generated OTP: {otp_code}")
+        
+        # Store OTP in database
+        otp_doc = {
+            "email": email,
+            "code": otp_code,
+            "createdAt": datetime.now(timezone.utc),
+            "expiresAt": datetime.now(timezone.utc) + timedelta(minutes=10),  # 10-minute expiry
+            "used": False
+        }
+        
+        # Delete any existing OTPs for this email
+        otp_coll.delete_many({"email": email})
+        
+        # Insert new OTP
+        otp_coll.insert_one(otp_doc)
+        print("✅ OTP stored in database")
+        
+        # Send OTP via email
+        try:
+            email_service = EmailService(
+                current_app.config['SENDER_EMAIL'],
+                current_app.config['AWS_REGION']
+            )
+            
+            subject = "Pragati - Email Verification Code"
+            html_body = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+            </head>
+            <body style="margin: 0; padding: 20px; font-family: Arial, sans-serif; background-color: #f5f5f5;">
+                <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; padding: 30px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <div style="text-align: center; margin-bottom: 30px;">
+                        <h1 style="color: #667eea; margin: 0;">Email Verification</h1>
+                    </div>
+                    
+                    <p style="font-size: 16px; color: #333;">Hello,</p>
+                    
+                    <p style="font-size: 15px; color: #555; line-height: 1.6;">
+                        Thank you for registering with Pragati Innovation Platform. 
+                        Please use the code below to verify your email address:
+                    </p>
+                    
+                    <div style="background: #667eea; color: white; padding: 20px; border-radius: 8px; text-align: center; margin: 30px 0;">
+                        <p style="margin: 0; font-size: 14px; opacity: 0.9;">Your Verification Code</p>
+                        <h1 style="margin: 10px 0; font-size: 48px; letter-spacing: 8px; font-family: monospace;">
+                            {otp_code}
+                        </h1>
+                    </div>
+                    
+                    <div style="background: #fef3c7; padding: 15px; border-radius: 6px; border-left: 4px solid #f59e0b; margin: 20px 0;">
+                        <strong style="color: #92400e;">⏰ This code expires in 10 minutes</strong>
+                    </div>
+                    
+                    <p style="font-size: 14px; color: #666; margin-top: 30px;">
+                        If you didn't request this code, please ignore this email.
+                    </p>
+                    
+                    <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb; text-align: center;">
+                        <p style="font-size: 12px; color: #999; margin: 5px 0;">Pragati Innovation Platform</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            email_service.send_email(email, subject, html_body)
+            print(f"✅ OTP email sent to {email}")
+        except Exception as e:
+            print(f"❌ Email sending failed: {e}")
+            return jsonify({"error": "Failed to send OTP email"}), 500
+        
+        print("="*80)
+        print("✅ OTP SENT SUCCESSFULLY")
+        print("="*80)
+        
+        return jsonify({
+            "success": True,
+            "message": "OTP sent successfully to your email",
+            "email": email,
+            "expiresIn": 600  # 10 minutes in seconds
+        }), 200
+        
+    except Exception as e:
+        print("="*80)
+        print("❌ SEND OTP ERROR")
+        print("="*80)
+        print(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to send OTP", "message": str(e)}), 500
+
+
+# ============================================================================
+# EMAIL OTP - VERIFY
+# ============================================================================
+
+@auth_bp.route('/otp/verify', methods=['POST'])
+def verify_otp():
+    """
+    Verify OTP code (optional - can also verify during signup)
+    
+    Request:
+        {
+          "email": "user@example.com",
+          "otp": "123456"
+        }
+    
+    Returns:
+        - success, message
+    """
+    try:
+        body = request.get_json(force=True)
+        email = body.get('email', '').strip().lower()
+        otp_code = body.get('otp', '').strip()
+        
+        if not email or not otp_code:
+            return jsonify({"error": "Email and OTP are required"}), 400
+        
+        # Find valid OTP
+        otp_record = otp_coll.find_one({
+            "email": email,
+            "code": otp_code,
+            "used": False,
+            "expiresAt": {"$gte": datetime.now(timezone.utc)}
+        })
+        
+        if not otp_record:
+            return jsonify({"error": "Invalid or expired OTP"}), 401
+        
+        return jsonify({
+            "success": True,
+            "message": "OTP verified successfully",
+            "email": email
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": "OTP verification failed", "message": str(e)}), 500
