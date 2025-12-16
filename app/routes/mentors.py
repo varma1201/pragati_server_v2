@@ -318,6 +318,342 @@ def accept_mentor_request(request_id):
     }), 200
 
 # =========================================================================
+# 3. MENTOR REJECTS REQUEST
+# =========================================================================
+@mentors_bp.route('/request/<request_id>/reject', methods=['POST'])
+@requires_role(['internal_mentor', 'mentor'])
+def reject_mentor_request(request_id):
+    """Mentor rejects the mentorship request"""
+    
+    caller_id = request.user_id
+    body = request.get_json(force=True) or {}
+    rejection_reason = body.get('reason', '').strip()
+    
+    # Validate and convert request_id
+    try:
+        req_oid = ObjectId(request_id)
+    except Exception:
+        return jsonify({"error": "Invalid request ID format"}), 400
+    
+    # Convert caller_id to ObjectId if needed
+    if isinstance(caller_id, str):
+        try:
+            caller_id = ObjectId(caller_id)
+        except:
+            return jsonify({"error": "Invalid user ID format"}), 400
+    
+    # Fetch mentor request
+    mentor_request = mentor_requests_coll.find_one({"_id": req_oid})
+    if not mentor_request:
+        return jsonify({"error": "Request not found"}), 404
+    
+    # Validate status and ownership
+    if mentor_request['status'] != 'pending':
+        return jsonify({"error": "Request already processed"}), 409
+    
+    # Check if caller is the mentor (handle both ObjectId and string)
+    mentor_id = mentor_request.get('mentorId')
+    if isinstance(mentor_id, str):
+        mentor_id = ObjectId(mentor_id) if len(mentor_id) == 24 else mentor_id
+    
+    if caller_id != mentor_id:
+        return jsonify({"error": "Access denied"}), 403
+    
+    # Get draft details
+    draft = drafts_coll.find_one({"_id": mentor_request['draftId']})
+    draft_title = draft.get('title', 'Your Idea') if draft else 'Your Idea'
+    
+    # Atomic update: mark request as rejected
+    mentor_requests_coll.update_one(
+        {"_id": req_oid, "status": "pending"},  # Guard against race condition
+        {"$set": {
+            "status": "rejected",
+            "rejectionReason": rejection_reason,
+            "respondedAt": datetime.now(timezone.utc),
+            "updatedAt": datetime.now(timezone.utc)
+        }}
+    )
+    
+    # Update draft with rejected status
+    drafts_coll.update_one(
+        {"_id": mentor_request['draftId']},
+        {
+            "$set": {
+                "mentorRequestStatus": "rejected",
+                "mentorRejectionReason": rejection_reason,
+                "updatedAt": datetime.now(timezone.utc)
+            },
+            "$unset": {
+                "mentorId": "",
+                "mentorName": "",
+                "mentorEmail": ""
+            }
+        }
+    )
+    
+    # Notify innovator
+    try:
+        NotificationService.create_notification(
+            str(mentor_request['innovatorId']),
+            'MENTOR_REQUEST_REJECTED',
+            {
+                'mentorName': mentor_request['mentorName'],
+                'ideaTitle': draft_title,
+                'reason': rejection_reason or 'No reason provided'
+            }
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to send notification: {e}")
+    
+    # Send rejection email
+    try:
+        email_service = EmailService(
+            current_app.config['SENDER_EMAIL'],
+            current_app.config['AWS_REGION']
+        )
+        
+        platform_url = current_app.config.get('PLATFORM_URL', 'http://localhost:3000')
+        mentors_url = f"{platform_url}/dashboard/innovator/ideas/drafts"
+        
+        subject = f"Mentor Request Update: {mentor_request['mentorName']} - {draft_title}"
+        
+        reason_html = ""
+        if rejection_reason:
+            reason_html = f"""
+            <div style="background: #f8d7da; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #721c24;">
+                <p style="margin: 0; color: #721c24;"><strong>Reason:</strong></p>
+                <p style="margin: 10px 0 0 0; color: #721c24;">{rejection_reason}</p>
+            </div>
+            """
+        
+        html_body = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; color: #333;">
+            <h2>Mentor Request Update</h2>
+            <p>Dear {mentor_request['innovatorName']},</p>
+            
+            <p><strong>{mentor_request['mentorName']}</strong> is unable to mentor your idea at this time.</p>
+            
+            <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #856404;">
+                <h3 style="margin-top: 0; color: #856404;">Idea: {draft_title}</h3>
+                <p style="margin: 5px 0;"><strong>Status:</strong> <span style="color: #856404;">Request Declined</span></p>
+            </div>
+            
+            {reason_html}
+            
+            <p><strong>Next Steps:</strong></p>
+            <ul style="line-height: 1.8;">
+                <li>You can request another mentor from the available list</li>
+                <li>Review and refine your idea if needed</li>
+                <li>Consider the feedback for improvement</li>
+            </ul>
+            
+            <p style="margin: 30px 0;">
+                <a href="{mentors_url}" 
+                   style="background: #007bff; color: white; padding: 12px 24px; 
+                          text-decoration: none; border-radius: 5px; display: inline-block;">
+                    Find Another Mentor
+                </a>
+            </p>
+            
+            <p style="color: #666; font-size: 14px; margin-top: 40px;">
+                Don't be discouraged! Finding the right mentor-mentee match is important for both parties.
+            </p>
+        </body>
+        </html>
+        """
+        
+        email_service.send_email(
+            mentor_request['innovatorEmail'], 
+            subject, 
+            html_body
+        )
+        print(f"✅ Rejection email sent to {mentor_request['innovatorEmail']}")
+        
+    except Exception as e:
+        print(f"⚠️ Email sending failed: {e}")
+        # Don't fail the API call if email fails
+    
+    return jsonify({
+        "success": True,
+        "message": "Mentor request rejected successfully"
+    }), 200
+
+# =========================================================================
+# 4. MENTOR REQUEST HISTORY (For Mentors)
+# =========================================================================
+@mentors_bp.route('/my-requests-history', methods=['GET'])
+@requires_role(['internal_mentor', 'mentor', 'external_mentor'])
+def get_mentor_request_history():
+    """
+    Get mentor's request history (all requests sent to this mentor).
+    Supports filtering by status and pagination.
+    
+    Query params:
+        - status: 'pending', 'accepted', 'rejected', or 'all' (default: 'all')
+        - page: Page number (default: 1)
+        - limit: Items per page (default: 20)
+        - search: Search by innovator name or idea title
+    """
+    
+    caller_id = request.user_id
+    
+    # Convert to ObjectId if needed
+    if isinstance(caller_id, str):
+        try:
+            caller_id = ObjectId(caller_id)
+        except:
+            return jsonify({"error": "Invalid user ID format"}), 400
+    
+    # Query parameters
+    status_filter = request.args.get('status', 'all').lower()
+    page = int(request.args.get('page', 1))
+    limit = int(request.args.get('limit', 20))
+    search_query = request.args.get('search', '').strip()
+    
+    skip = (page - 1) * limit
+    
+    print(f"📋 Fetching request history for mentor: {caller_id}")
+    print(f"   Status filter: {status_filter}")
+    print(f"   Page: {page}, Limit: {limit}")
+    
+    # Build query
+    query = {
+        "$or": [
+            {"mentorId": caller_id},
+            {"mentorId": str(caller_id)}
+        ]
+    }
+    
+    # Status filter
+    if status_filter != 'all' and status_filter in ['pending', 'accepted', 'rejected']:
+        query['status'] = status_filter
+    
+    # Search filter
+    if search_query:
+        query['$or'] = [
+            {"innovatorName": {"$regex": search_query, "$options": "i"}},
+            {"draftTitle": {"$regex": search_query, "$options": "i"}}
+        ]
+        # Keep mentorId filter
+        query["$and"] = [
+            {
+                "$or": [
+                    {"mentorId": caller_id},
+                    {"mentorId": str(caller_id)}
+                ]
+            }
+        ]
+    
+    print(f"   Query: {query}")
+    
+    # Get total count
+    total_count = mentor_requests_coll.count_documents(query)
+    
+    # Fetch requests with pagination
+    requests_cursor = mentor_requests_coll.find(query).sort("createdAt", -1).skip(skip).limit(limit)
+    
+    requests_list = []
+    for req in requests_cursor:
+        # Get innovator details
+        innovator_id = req.get('innovatorId')
+        innovator = None
+        if innovator_id:
+            innovator = find_user(innovator_id)
+        
+        # Get draft details if available
+        draft_id = req.get('draftId')
+        draft = None
+        if draft_id:
+            draft = drafts_coll.find_one({"_id": draft_id})
+        
+        # Build request data
+        request_data = {
+            "_id": str(req.get('_id')),
+            "requestId": str(req.get('_id')),
+            "status": req.get('status', 'pending'),
+            
+            # Innovator info
+            "innovatorId": str(req.get('innovatorId', '')),
+            "innovatorName": req.get('innovatorName', 'Unknown'),
+            "innovatorEmail": req.get('innovatorEmail', ''),
+            "innovatorPhone": innovator.get('phone', '') if innovator else '',
+            "innovatorCollege": innovator.get('collegeName', '') if innovator else '',
+            
+            # Draft/Idea info
+            "draftId": str(req.get('draftId', '')),
+            "draftTitle": req.get('draftTitle', 'Untitled'),
+            "domain": draft.get('domain', '') if draft else '',
+            "background": draft.get('background', '') if draft else '',
+            "pptFileName": draft.get('pptFileName', '') if draft else '',
+            
+            # Mentor info
+            "mentorId": str(req.get('mentorId', '')),
+            "mentorName": req.get('mentorName', ''),
+            "mentorEmail": req.get('mentorEmail', ''),
+            
+            # Questions asked by innovator
+            "questions": req.get('questions', ''),
+            
+            # Response info
+            "rejectionReason": req.get('rejectionReason', '') if req.get('status') == 'rejected' else None,
+            "respondedAt": req.get('respondedAt').isoformat() if req.get('respondedAt') else None,
+            
+            # Timestamps
+            "createdAt": req.get('createdAt').isoformat() if req.get('createdAt') else None,
+            "updatedAt": req.get('updatedAt').isoformat() if req.get('updatedAt') else None,
+            
+            # Helper flags
+            "isPending": req.get('status') == 'pending',
+            "isAccepted": req.get('status') == 'accepted',
+            "isRejected": req.get('status') == 'rejected',
+            
+            # Time since request
+            "daysAgo": (datetime.now(timezone.utc) - req.get('createdAt')).days if req.get('createdAt') else 0
+        }
+        
+        requests_list.append(request_data)
+    
+    # Calculate statistics
+    stats = {
+        "total": total_count,
+        "pending": mentor_requests_coll.count_documents({
+            **query,
+            "status": "pending"
+        }) if status_filter == 'all' else None,
+        "accepted": mentor_requests_coll.count_documents({
+            **query,
+            "status": "accepted"
+        }) if status_filter == 'all' else None,
+        "rejected": mentor_requests_coll.count_documents({
+            **query,
+            "status": "rejected"
+        }) if status_filter == 'all' else None
+    }
+    
+    print(f"✅ Found {len(requests_list)} requests (Total: {total_count})")
+    print(f"   Stats: {stats}")
+    
+    return jsonify({
+        "success": True,
+        "data": requests_list,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total_count,
+            "pages": (total_count + limit - 1) // limit,
+            "hasNext": skip + limit < total_count,
+            "hasPrev": page > 1
+        },
+        "stats": stats,
+        "filters": {
+            "status": status_filter,
+            "search": search_query
+        }
+    }), 200
+
+
+# =========================================================================
 # 4. GET MENTOR'S PENDING REQUESTS (Dashboard)
 # =========================================================================
 @mentors_bp.route('/my-requests', methods=['GET'])

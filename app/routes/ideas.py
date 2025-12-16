@@ -386,40 +386,71 @@ def submit_idea():
     print("submit_idea: Starting submission process")
     
     uid = request.user_id
+    
+    # ✅ FIX: Convert uid to ObjectId early
+    if isinstance(uid, str):
+        try:
+            uid = ObjectId(uid)
+        except:
+            return jsonify({"error": "Invalid user ID format"}), 400
+    
+    uid_str = str(uid)  # Keep both formats
+    print(f"🔍 User ID: {uid} (ObjectId), {uid_str} (string)")
+    
     body = request.get_json()
     draft_id = body.get('draftId')
     
     if not draft_id:
         return jsonify({"error": "draftId is required"}), 400
 
-    # TITLE: Convert draft_id to ObjectId
+    # Convert draft_id to ObjectId
     try:
         draft_oid = ObjectId(draft_id) if ObjectId.is_valid(draft_id) else draft_id
     except:
         return jsonify({"error": "Invalid draft ID format"}), 400
 
-    # TITLE: FETCH DRAFT
-    draft = drafts_coll.find_one(
-        {"_id": draft_oid, normalize_any_id_field("ownerId"): uid}
-    )
-    if not draft:
-        print(f"Draft not found: {draft_id}")
-        return jsonify({"error": "Draft not found or access denied"}), 404
-    
-    print(f"Draft found: {draft_id}")
-    print(f"Draft data: title={draft.get('title')}, owner={uid}")
+    print(f"🔍 Looking for draft: {draft_oid}")
+    print(f"   Owner should be: {uid} OR {uid_str}")
 
-    # TITLE: FETCH INNOVATOR
+    # ✅ FIX: Simplified query - try both ObjectId and string for ownerId
+    draft = drafts_coll.find_one({
+        "_id": draft_oid,
+        "$or": [
+            {"ownerId": uid},      # Try as ObjectId
+            {"ownerId": uid_str}   # Try as string
+        ]
+    })
+    
+    # Debug: If not found, check if draft exists at all
+    if not draft:
+        draft_check = drafts_coll.find_one({"_id": draft_oid})
+        if draft_check:
+            print(f"❌ Draft exists but ownerId mismatch!")
+            print(f"   Draft ownerId: {draft_check.get('ownerId')} (type: {type(draft_check.get('ownerId'))})")
+            print(f"   Expected: {uid} (type: {type(uid)})")
+            return jsonify({
+                "error": "Access denied",
+                "message": "This draft belongs to another user"
+            }), 403
+        else:
+            print(f"❌ Draft not found: {draft_id}")
+            return jsonify({"error": "Draft not found"}), 404
+    
+    print(f"✅ Draft found: {draft_id}")
+    print(f"   Draft owner: {draft.get('ownerId')} (type: {type(draft.get('ownerId'))})")
+    print(f"   Draft title: {draft.get('title')}")
+
+    # FETCH INNOVATOR
     innovator = find_user(uid)
     if not innovator:
         return jsonify({"error": "User profile not found"}), 404
 
-    # ==================== NEW: CREDIT VALIDATION ====================
+    # ==================== CREDIT VALIDATION ====================
     user_credits = innovator.get('creditQuota', 0)
-    print(f"User credits: {user_credits}")
+    print(f"💰 User credits: {user_credits}")
     
     if user_credits < 1:
-        print(f"Insufficient credits for user {uid}")
+        print(f"❌ Insufficient credits for user {uid}")
         return jsonify({
             "error": "Insufficient credits",
             "message": "You need at least 1 credit to submit an idea. Please request credits from your TTC coordinator.",
@@ -430,12 +461,11 @@ def submit_idea():
         }), 403
     
     print(f"✅ Credit check passed: {user_credits} credits available")
-    # ================================================================
 
-    # TITLE: VALIDATION 1 - Psychometric completed
+    # VALIDATION 1 - Psychometric completed
     is_psychometric_done = innovator.get('isPsychometricAnalysisDone', False)
     if not is_psychometric_done:
-        print(f"Psychometric analysis not completed for user {uid}")
+        print(f"❌ Psychometric analysis not completed for user {uid}")
         return jsonify({
             "error": "Psychometric analysis required",
             "message": "Please complete your psychometric analysis before submitting.",
@@ -444,38 +474,37 @@ def submit_idea():
         }), 403
     print(f"✅ Psychometric verified for user {uid}")
 
-    # TITLE: VALIDATION 2 - NOT ALREADY SUBMITTED
+    # VALIDATION 2 - NOT ALREADY SUBMITTED
     if draft.get('isSubmitted'):
-        print(f"Draft already submitted")
+        print(f"❌ Draft already submitted")
         return jsonify({
             "error": "Already submitted",
             "message": "This draft has already been submitted."
         }), 409
 
-    # TITLE: VALIDATION 3 - MENTOR APPROVED (MANDATORY)
+    # VALIDATION 3 - MENTOR APPROVED (MANDATORY)
     mentor_status = draft.get('mentorRequestStatus', 'none')
-    print(f"Mentor status check:")
-    print(f"  - mentorRequestStatus: {mentor_status}")
-    print(f"  - mentorId: {draft.get('mentorId')}")
-    print(f"  - mentorName: {draft.get('mentorName')}")
-    print(f"  - mentorEmail: {draft.get('mentorEmail')}")
+    print(f"👨🏫 Mentor status check:")
+    print(f"   - mentorRequestStatus: {mentor_status}")
+    print(f"   - mentorId: {draft.get('mentorId')}")
+    print(f"   - mentorName: {draft.get('mentorName')}")
     
     if mentor_status == 'pending':
-        print(f"Mentor approval pending")
+        print(f"⏳ Mentor approval pending")
         return jsonify({
             "error": "Mentor approval pending",
             "message": "Please wait for your mentor to approve your request."
         }), 403
     
     if mentor_status == 'rejected':
-        print(f"Mentor rejected request")
+        print(f"❌ Mentor rejected request")
         return jsonify({
             "error": "Mentor rejected your request",
             "message": "Please select a different mentor and request approval."
         }), 403
     
     if mentor_status != 'accepted':
-        print(f"Mentor not approved. Current status: {mentor_status}")
+        print(f"❌ Mentor not approved. Current status: {mentor_status}")
         return jsonify({
             "error": "Mentor approval required",
             "message": "Please request a mentor and get approval before submitting.",
@@ -484,16 +513,103 @@ def submit_idea():
     
     print(f"✅ Mentor approved: {draft.get('mentorName')}")
 
-    # ... [rest of validations continue as before] ...
+    # VALIDATION 4 - PPT UPLOADED
+    if not draft.get('pptFileName') or not draft.get('pptFileKey'):
+        print(f"❌ PPT not uploaded")
+        return jsonify({
+            "error": "PPT required",
+            "message": "Please upload a PPT presentation before submitting."
+        }), 403
+    print(f"✅ PPT uploaded: {draft.get('pptFileName')}")
 
-    # TITLE: CREATE IDEA DOCUMENT
+    # VALIDATION 5 - REQUIRED FIELDS
+    required_fields = ['title', 'domain']
+    missing_fields = [f for f in required_fields if not draft.get(f)]
+    if missing_fields:
+        print(f"❌ Missing required fields: {missing_fields}")
+        return jsonify({
+            "error": "Missing required fields",
+            "message": f"Please fill in: {', '.join(missing_fields)}"
+        }), 403
+    print(f"✅ All required fields present")
+
+    # Get team members who accepted
+    team_invites = draft.get('teamMembers', [])
+    accepted_team_ids = [
+        member['userId'] 
+        for member in team_invites 
+        if member.get('status') == 'accepted'
+    ]
+    print(f"👥 Team members accepted: {len(accepted_team_ids)}")
+
+    # Get innovator details
+    innovator_name = innovator.get('name', 'Unknown')
+    innovator_email = innovator.get('email', '')
+    ttc_id = innovator.get('ttcCoordinatorId') or innovator.get('createdBy')
+    college_id = innovator.get('collegeId')
+
+    # CREATE IDEA DOCUMENT
     idea_id = ObjectId()
+    now = datetime.now(timezone.utc)
+    
     idea_doc = {
         "_id": idea_id,
-        # ... [all other fields as before] ...
+        "title": draft.get('title'),
+        "description": draft.get('description'),
+        "domain": draft.get('domain'),
+        "background": draft.get('background', ''),
+        "pptFileName": draft.get('pptFileName'),
+        "pptFileKey": draft.get('pptFileKey'),
+        "pptFileUrl": draft.get('pptFileUrl'),
+        "pptFileSize": draft.get('pptFileSize'),
+        
+        # Innovator info
+        "innovatorId": uid,
+        "innovatorName": innovator_name,
+        "innovatorEmail": innovator_email,
+        
+        # Mentor info (from approved mentor)
+        "mentorId": draft.get('mentorId'),
+        "mentorName": draft.get('mentorName'),
+        "mentorEmail": draft.get('mentorEmail'),
+        "mentorRequestStatus": "accepted",
+        
+        # Team info
+        "coreTeamIds": accepted_team_ids,
+        "invitedTeam": [member['email'] for member in team_invites if member.get('status') == 'accepted'],
+        
+        # Hierarchy
+        "ttcCoordinatorId": ttc_id,
+        "collegeId": college_id,
+        
+        # Status & Timestamps
+        "status": "submitted",
+        "isSubmitted": True,
+        "submittedAt": now,
+        "createdAt": now,
+        "updatedAt": now,
+        
+        # AI Validation fields (initially empty)
+        "overallScore": None,
+        "clusterScores": {},
+        "aiValidationStatus": "pending",
+        "aiValidationCompletedAt": None,
+        "aiRecommendations": [],
+        
+        # Consultation fields (initially empty)
+        "consultationMentorId": None,
+        "consultationScheduledAt": None,
+        "consultationStatus": None,
+        "consultationNotes": "",
+        "consultationRequestStatus": None,
+        
+        # Metadata
+        "isDeleted": False,
+        "deletedAt": None,
+        "version": 1
     }
 
-    # TITLE: INSERT IDEA, DELETE DRAFT, **DEDUCT CREDIT**
+    # INSERT IDEA, DELETE DRAFT, DEDUCT CREDIT
     try:
         # Step 1: Insert the idea
         ideas_coll.insert_one(idea_doc)
@@ -503,26 +619,30 @@ def submit_idea():
         drafts_coll.delete_one({"_id": draft_oid})
         print(f"✅ Draft deleted: {draft_id}")
         
-        # ==================== NEW: DEDUCT 1 CREDIT ====================
+        # Step 3: DEDUCT 1 CREDIT
+        print(f"💳 Attempting to deduct credit from user: {uid} (type: {type(uid)})")
+        
         credit_result = users_coll.update_one(
-            {"_id": uid, "creditQuota": {"$gte": 1}},  # Double-check credits
-            {"$inc": {"creditQuota": -1}}  # Deduct 1 credit
+            {"_id": uid, "creditQuota": {"$gte": 1}},
+            {"$inc": {"creditQuota": -1}}
         )
+        
+        print(f"💳 Credit deduction result: modified_count={credit_result.modified_count}")
         
         if credit_result.modified_count == 0:
             # Rollback: Delete the idea we just created
             ideas_coll.delete_one({"_id": idea_id})
             print(f"❌ Credit deduction failed - idea rolled back")
+            
             return jsonify({
                 "error": "Credit deduction failed",
                 "message": "Unable to deduct credit. Please try again."
             }), 500
         
         print(f"✅ 1 credit deducted. Remaining: {user_credits - 1}")
-        # ==============================================================
         
     except Exception as e:
-        print(f"Submission error: {e}")
+        print(f"❌ Submission error: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({
@@ -530,12 +650,77 @@ def submit_idea():
             "message": "An error occurred while creating your idea. Please try again."
         }), 500
 
-    # TITLE: SEND NOTIFICATIONS [continues as before...]
-    
+    # SEND NOTIFICATIONS
     idea_title = idea_doc.get('title', 'Untitled Idea')
+    notification_count = 0
     
-    # ... [all notifications continue as before] ...
-
+    base_data = {
+        'ideaId': str(idea_id),
+        'ideaTitle': idea_title,
+        'innovatorName': innovator_name,
+        'submittedAt': now.strftime('%Y-%m-%d %H:%M UTC')
+    }
+    
+    print(f"📧 Sending notifications...")
+    
+    # 1. Notify TTC Coordinator
+    if ttc_id:
+        try:
+            NotificationService.create_notification(
+                str(ttc_id),
+                'IDEA_SUBMITTED',
+                base_data,
+                role='ttc'
+            )
+            notification_count += 1
+            print(f"   ✅ TTC Coordinator notified")
+        except Exception as e:
+            print(f"   ⚠️ Failed to notify TTC: {e}")
+    
+    # 2. Notify College Admin
+    if college_id:
+        try:
+            NotificationService.create_notification(
+                str(college_id),
+                'IDEA_SUBMITTED',
+                base_data,
+                role='college_admin'
+            )
+            notification_count += 1
+            print(f"   ✅ College Admin notified")
+        except Exception as e:
+            print(f"   ⚠️ Failed to notify College Admin: {e}")
+    
+    # 3. Notify Mentor
+    mentor_id = draft.get('mentorId')
+    if mentor_id:
+        try:
+            NotificationService.create_notification(
+                str(mentor_id),
+                'IDEA_SUBMITTED',
+                {**base_data, 'mentorName': draft.get('mentorName', 'Mentor')},
+                role='mentor'
+            )
+            notification_count += 1
+            print(f"   ✅ Mentor notified")
+        except Exception as e:
+            print(f"   ⚠️ Failed to notify Mentor: {e}")
+    
+    # 4. Notify Team Members
+    for team_member_id in accepted_team_ids:
+        if not ids_match(team_member_id, uid):
+            try:
+                NotificationService.create_notification(
+                    str(team_member_id),
+                    'IDEA_SUBMITTED',
+                    base_data,
+                    role='team_member'
+                )
+                notification_count += 1
+            except Exception as e:
+                print(f"   ⚠️ Failed to notify team member: {e}")
+    
+    print(f"✅ {notification_count} stakeholders notified")
     print(f"✅ Idea submitted successfully: {idea_title}")
     print("="*80)
     
@@ -548,7 +733,8 @@ def submit_idea():
             "status": "submitted",
             "submittedAt": idea_doc["submittedAt"].isoformat(),
             "teamMembersAccepted": len(accepted_team_ids),
-            "creditsRemaining": user_credits - 1  # NEW: Show remaining credits
+            "creditsRemaining": user_credits - 1,
+            "stakeholdersNotified": notification_count
         }
     }), 200
 
