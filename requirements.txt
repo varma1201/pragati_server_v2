@@ -9,3 +9,4 @@ numpy==1.26.2
 gunicorn==21.2.0
 weasyprint==60.0
 matplotlib==3.8.0 
+xhtml2pdf

@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from app.database.mongo import ideas_coll, users_coll
+from app.database.mongo import ideas_coll, users_coll, results_coll
 from app.middleware.auth import requires_auth, requires_role
 from app.utils.validators import clean_doc
 from bson import ObjectId
@@ -81,12 +81,12 @@ def college_domain_trend(collegeId):
 @requires_role(['ttc_coordinator', 'college_admin'])
 def idea_quality_trend():
     """Monthly idea quality trends"""
-    caller = request.token_payload
-    role = caller.get('role')
-    caller_id = caller.get('uid')
+    # ✅ FIX
+    caller_id = request.user_id
+    caller_role = request.user_role
     
     # Get innovator IDs based on role
-    if role == 'ttc_coordinator':
+    if caller_role == 'ttc_coordinator':
         innovator_ids = users_coll.distinct("_id", {"createdBy": caller_id, "role": "innovator"})
     else:  # college_admin
         innovator_ids = users_coll.distinct("_id", {"collegeId": caller_id, "role": "innovator"})
@@ -120,12 +120,12 @@ def idea_quality_trend():
 @requires_role(['ttc_coordinator', 'college_admin'])
 def category_success():
     """Success breakdown by domain"""
-    caller = request.token_payload
-    role = caller.get('role')
-    caller_id = caller.get('uid')
+    # ✅ FIX
+    caller_id = request.user_id
+    caller_role = request.user_role
     
     # Get innovator IDs
-    if role == 'ttc_coordinator':
+    if caller_role == 'ttc_coordinator':
         innovator_ids = users_coll.distinct("_id", {"createdBy": caller_id, "role": "innovator"})
     else:  # college_admin
         innovator_ids = users_coll.distinct("_id", {"collegeId": caller_id, "role": "innovator"})
@@ -210,12 +210,12 @@ def top_innovators():
 @requires_role(['ttc_coordinator', 'college_admin'])
 def rejection_reasons():
     """Top 4 rejection reasons"""
-    caller = request.token_payload
-    role = caller.get('role')
-    caller_id = caller.get('uid')
+    # ✅ FIX
+    caller_id = request.user_id
+    caller_role = request.user_role
     
     # Get innovator IDs
-    if role == 'ttc_coordinator':
+    if caller_role == 'ttc_coordinator':
         innovator_ids = users_coll.distinct("_id", {"createdBy": caller_id, "role": "innovator"})
     else:  # college_admin
         innovator_ids = users_coll.distinct("_id", {"collegeId": caller_id, "role": "innovator"})
@@ -268,12 +268,12 @@ def rejection_reasons():
 @requires_role(['ttc_coordinator', 'college_admin'])
 def innovator_engagement():
     """Active vs invited innovators"""
-    caller = request.token_payload
-    role = caller.get('role')
-    caller_id = caller.get('uid')
+    # ✅ FIX - Replace the old code below
+    caller_id = request.user_id
+    caller_role = request.user_role
     
     # Get innovator IDs based on role
-    if role == 'ttc_coordinator':
+    if caller_role == 'ttc_coordinator':
         innovator_ids = users_coll.distinct("_id", {"createdBy": caller_id, "role": "innovator"})
     else:  # college_admin
         innovator_ids = users_coll.distinct("_id", {"collegeId": caller_id, "role": "innovator"})
@@ -295,8 +295,6 @@ def innovator_engagement():
     return jsonify({"success": True, "data": data}), 200
 
 
-# Add to analytics.py
-
 # -------------------------------------------------------------------------
 # 8. INNOVATOR PERSONAL STATS - Overview metrics for innovator's dashboard
 # -------------------------------------------------------------------------
@@ -306,15 +304,33 @@ def innovator_personal_stats():
     """Get personal statistics for the logged-in innovator"""
     caller_id = request.user_id
     
-    # Get all ideas for this innovator
+    # ✅ FIX: Convert caller_id to ObjectId if needed
+    if isinstance(caller_id, str):
+        try:
+            caller_id = ObjectId(caller_id)
+        except:
+            return jsonify({"error": "Invalid user ID format"}), 400
+    
+    caller_id_str = str(caller_id)
+    
+    print(f"📊 Fetching stats for innovator: {caller_id}")
+    
+    # ✅ FIX: Query with both ObjectId and string to match all ideas
     ideas = list(ideas_coll.find({
-        "innovatorId": caller_id,
+        "$or": [
+            {"innovatorId": caller_id},      # Try as ObjectId
+            {"innovatorId": caller_id_str}   # Try as string
+        ],
         "isDeleted": {"$ne": True}
     }))
+    
+    print(f"   Found {len(ideas)} total ideas")
     
     # Calculate stats
     total_ideas = len(ideas)
     validated_ideas = [idea for idea in ideas if idea.get('overallScore') is not None]
+    
+    print(f"   Validated ideas: {len(validated_ideas)}")
     
     # Average score
     average_score = 0
@@ -323,7 +339,11 @@ def innovator_personal_stats():
     
     # Approval rate (score >= 80)
     approved_count = sum(1 for idea in validated_ideas if idea.get('overallScore', 0) >= 80)
-    approval_rate = (approved_count / total_ideas * 100) if total_ideas > 0 else 0
+    
+    # ✅ FIX: Calculate approval rate based on validated ideas, not total ideas
+    approval_rate = (approved_count / len(validated_ideas) * 100) if len(validated_ideas) > 0 else 0
+    
+    print(f"   Approved: {approved_count}, Approval Rate: {approval_rate}%")
     
     # Ideas by status
     status_breakdown = {}
@@ -345,51 +365,6 @@ def innovator_personal_stats():
 
 
 # -------------------------------------------------------------------------
-# 9. INNOVATOR SCORE OVER TIME - Track improvement
-# -------------------------------------------------------------------------
-@analytics_bp.route('/innovator/score-timeline', methods=['GET'])
-@requires_role(['innovator', 'individual_innovator'])
-def innovator_score_timeline():
-    """Get score progression over time for the innovator"""
-    caller_id = request.user_id
-    
-    # Get ideas sorted by submission date
-    pipeline = [
-        {
-            "$match": {
-                "innovatorId": caller_id,
-                "overallScore": {"$exists": True, "$ne": None},
-                "isDeleted": {"$ne": True}
-            }
-        },
-        {
-            "$sort": {"submittedAt": 1}
-        },
-        {
-            "$project": {
-                "_id": 0,
-                "ideaId": "$_id",
-                "name": "$title",
-                "date": {
-                    "$dateToString": {
-                        "format": "%Y-%m-%d",
-                        "date": "$submittedAt"
-                    }
-                },
-                "score": "$overallScore"
-            }
-        }
-    ]
-    
-    data = list(ideas_coll.aggregate(pipeline))
-    
-    return jsonify({
-        "success": True,
-        "data": data
-    }), 200
-
-
-# -------------------------------------------------------------------------
 # 10. INNOVATOR CLUSTER PERFORMANCE - Spider chart data
 # -------------------------------------------------------------------------
 @analytics_bp.route('/innovator/cluster-performance', methods=['GET'])
@@ -398,50 +373,145 @@ def innovator_cluster_performance():
     """Get average cluster scores for the innovator"""
     caller_id = request.user_id
     
-    # Get all validated ideas
-    ideas = list(ideas_coll.find({
-        "innovatorId": caller_id,
-        "clusterScores": {"$exists": True},
-        "isDeleted": {"$ne": True}
+    # Convert to both formats
+    if isinstance(caller_id, str):
+        try:
+            caller_id_obj = ObjectId(caller_id)
+        except:
+            caller_id_obj = None
+    else:
+        caller_id_obj = caller_id
+    
+    caller_id_str = str(caller_id)
+    
+    print(f"📊 Fetching cluster performance for innovator: {caller_id_str}")
+    
+    # ✅ Query results_coll instead of ideas_coll
+    from app.database.mongo import results_coll
+    
+    results = list(results_coll.find({
+        "$or": [
+            {"innovatorId": caller_id_obj},
+            {"innovatorId": caller_id_str}
+        ]
     }))
     
-    if not ideas:
-        # Return default structure with 0 scores
+    print(f"   Found {len(results)} validation results")
+    
+    if not results:
+        print("   No results found, returning default structure")
         return jsonify({
             "success": True,
             "data": {
-                "Core Idea & Innovation": 0,
-                "Market & Commercial Opportunity": 0,
-                "Execution & Operations": 0,
-                "Business Model & Strategy": 0,
-                "Team & Organizational Health": 0,
-                "External Environment & Compliance": 0,
-                "Risk & Future Outlook": 0
+                "Core Idea": 0,
+                "Market Opportunity": 0,
+                "Execution": 0,
+                "Business Model": 0,
+                "Team": 0,
+                "Compliance": 0,
+                "Risk & Strategy": 0
             }
         }), 200
     
-    # Aggregate cluster scores
+    # ✅ FIX: cluster_scores is directly in validationResult, not nested
     cluster_totals = {}
     cluster_counts = {}
     
-    for idea in ideas:
-        cluster_scores = idea.get('clusterScores', {})
+    for result in results:
+        validation_result = result.get('validationResult', {})
+        # ✅ Get cluster_scores directly from validationResult
+        cluster_scores = validation_result.get('cluster_scores', {})
+        
+        print(f"   Result {result.get('_id')}: cluster_scores = {cluster_scores}")
+        
         for cluster_name, score in cluster_scores.items():
             if score is not None:
                 cluster_totals[cluster_name] = cluster_totals.get(cluster_name, 0) + score
                 cluster_counts[cluster_name] = cluster_counts.get(cluster_name, 0) + 1
     
+    print(f"   Cluster totals: {cluster_totals}")
+    print(f"   Cluster counts: {cluster_counts}")
+    
     # Calculate averages
     avg_cluster_scores = {}
     for cluster_name in cluster_totals:
         avg_cluster_scores[cluster_name] = round(
-            cluster_totals[cluster_name] / cluster_counts[cluster_name], 
+            cluster_totals[cluster_name] / cluster_counts[cluster_name],
             2
         )
+    
+    print(f"   Average cluster scores: {avg_cluster_scores}")
     
     return jsonify({
         "success": True,
         "data": avg_cluster_scores
+    }), 200
+
+
+@analytics_bp.route('/innovator/score-timeline', methods=['GET'])
+@requires_role(['innovator', 'individual_innovator'])
+def innovator_score_timeline():
+    """Get score progression over time for the innovator"""
+    caller_id = request.user_id
+    
+    # Convert to both formats
+    if isinstance(caller_id, str):
+        try:
+            caller_id_obj = ObjectId(caller_id)
+        except:
+            caller_id_obj = None
+    else:
+        caller_id_obj = caller_id
+    
+    caller_id_str = str(caller_id)
+    
+    print(f"📈 Fetching score timeline for innovator: {caller_id_str}")
+    
+    from app.database.mongo import results_coll
+    
+    # ✅ Query with proper date field and sorting
+    results = list(results_coll.find({
+        "$or": [
+            {"innovatorId": caller_id_obj},
+            {"innovatorId": caller_id_str}
+        ]
+    }).sort("createdAt", 1))  # Use createdAt or check what date field exists
+    
+    print(f"   Found {len(results)} validation results")
+    
+    if not results:
+        print("   No results found, returning empty array")
+        return jsonify({
+            "success": True,
+            "data": []
+        }), 200
+    
+    # Build timeline data
+    timeline_data = []
+    for result in results:
+        validation_result = result.get('validationResult', {})
+        overall_score = validation_result.get('overall_score')
+        
+        # ✅ Try multiple date fields
+        date_submitted = result.get('submittedAt') or result.get('createdAt') or result.get('timestamp')
+        title = result.get('title', 'Untitled Idea')
+        
+        print(f"   Checking result: title={title}, score={overall_score}, date={date_submitted}")
+        
+        if overall_score is not None and date_submitted:
+            timeline_data.append({
+                "date": date_submitted.isoformat() if hasattr(date_submitted, 'isoformat') else str(date_submitted),
+                "score": round(overall_score, 2),
+                "ideaTitle": title,
+                "ideaId": str(result.get('ideaId', result.get('_id')))
+            })
+            print(f"   ✅ Added: {title} - Score: {overall_score}")
+    
+    print(f"   Timeline data points: {len(timeline_data)}")
+    
+    return jsonify({
+        "success": True,
+        "data": timeline_data
     }), 200
 
 
