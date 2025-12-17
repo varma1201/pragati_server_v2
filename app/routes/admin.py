@@ -1,6 +1,6 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from app.middleware.auth import requires_role
-from app.database.mongo import users_coll, ideas_coll, drafts_coll, db, consultation_requests_coll
+from app.database.mongo import users_coll, ideas_coll, drafts_coll, db, consultation_requests_coll, evaluations_coll
 from app.utils.validators import clean_doc
 from datetime import datetime, timezone
 from app.services.psychometric_service import PsychometricService
@@ -605,13 +605,12 @@ def impersonate_user(user_id):
     auth_service = AuthService(current_app.config['JWT_SECRET'])
     
     # Create special payload with impersonation flag
-    impersonation_token = auth_service.encode_token({
-        'uid': user_id,
-        'email': target_user.get('email'),
-        'role': target_user.get('role'),
-        'impersonatedBy': admin_id,
-        'isImpersonation': True
-    })
+    impersonation_token = auth_service.create_token(
+        uid=str(target_user["_id"]),
+        role=target_user["role"],
+        impersonatedBy=str(admin_id),
+        isImpersonation=True
+    )
     
     return jsonify({
         'success': True,
@@ -1980,4 +1979,155 @@ def reject_consultation_request(request_id):
         return jsonify({
             "error": "Failed to reject request",
             "message": str(e)
+        }), 500
+
+@admin_bp.route('/innovators/psychometric-insights', methods=['GET'])
+@requires_role(['super_admin'])
+def get_innovator_psychometric_insights():
+    """
+    Get all innovators with completed psychometric analysis.
+    Returns detailed psychometric profiles for Super Admin insights.
+    """
+    try:
+        # Get query parameters
+        search = request.args.get('search', '').strip()
+        
+        print("=" * 80)
+        print("🧠 FETCHING INNOVATOR PSYCHOMETRIC INSIGHTS")
+        print(f"   Search term: '{search}'")
+        
+        
+        # Get all psychometric evaluations
+        evaluations = list(evaluations_coll.find({}))
+        
+        print(f"   Found {len(evaluations)} psychometric evaluations")
+        
+        if not evaluations:
+            return jsonify({
+                "success": True,
+                "data": [],
+                "total": 0
+            }), 200
+        
+        # Extract user IDs from evaluations (user_id is stored as STRING)
+        user_id_strings = [eval_doc.get('user_id') for eval_doc in evaluations if eval_doc.get('user_id')]
+        
+        # Convert string IDs to ObjectId for querying users collection
+        user_ids = []
+        for uid_str in user_id_strings:
+            try:
+                user_ids.append(ObjectId(uid_str))
+            except Exception as e:
+                print(f"⚠️  Could not convert user_id '{uid_str}' to ObjectId: {e}")
+                continue
+        
+        print(f"   Extracted {len(user_ids)} user IDs")
+        
+        # Build user query
+        user_query = {
+            "_id": {"$in": user_ids},
+            "isDeleted": {"$ne": True}
+        }
+        
+        # Apply search filter if provided
+        if search:
+            user_query["$or"] = [
+                {"name": {"$regex": search, "$options": "i"}},
+                {"email": {"$regex": search, "$options": "i"}}
+            ]
+        
+        # Get user details
+        users = list(users_coll.find(user_query, {"password": 0}))
+        
+        print(f"   Found {len(users)} matching users")
+        
+        # Create user lookup map (key = string user_id)
+        user_map = {str(user["_id"]): user for user in users}
+        
+        # Combine evaluation data with user data
+        results = []
+        for evaluation in evaluations:
+            user_id_str = evaluation.get('user_id')
+            
+            if not user_id_str:
+                continue
+            
+            user = user_map.get(user_id_str)
+            
+            if not user:
+                continue  # Skip if user not found or doesn't match search
+            
+            # Format the response
+            result = {
+                "id": str(evaluation["_id"]),
+                "userId": user_id_str,
+                "name": user.get("name", evaluation.get("user_name", "Unknown")),
+                "email": user.get("email", ""),
+                "role": user.get("role", "innovator"),
+                "department": user.get("department", ""),
+                "year": user.get("year", ""),
+                "collegeId": user.get("collegeId", ""),
+                
+                # Psychometric scores
+                "psychometricScores": evaluation.get("psychometric_scores", {}),
+                "overallScore": evaluation.get("overall_psychometric_score", 0),
+                
+                # Entrepreneurial fit
+                "entrepreneurialFit": evaluation.get("entrepreneurial_fit", "Unknown"),
+                "fitScore": evaluation.get("fit_score", 0),
+                "idealRole": evaluation.get("ideal_role", ""),
+                "idealVentureType": evaluation.get("ideal_venture_type", ""),
+                
+                # Strengths & Weaknesses
+                "topStrengths": evaluation.get("top_strengths", []),
+                "developmentAreas": evaluation.get("development_areas", []),
+                
+                # Profile & Insights
+                "personalityProfile": evaluation.get("personality_profile", ""),
+                "riskToleranceLevel": evaluation.get("risk_tolerance_level", "Medium"),
+                
+                # Detailed insights
+                "detailedInsights": evaluation.get("detailed_insights", {}),
+                
+                # Recommendations
+                "recommendations": evaluation.get("recommendations", []),
+                "validationFocusAreas": evaluation.get("validation_focus_areas", []),
+                
+                # Metadata
+                "assessmentDate": evaluation.get("assessment_date", evaluation.get("created_at")),
+                "lastUpdated": evaluation.get("last_updated"),
+                "profileCompleteness": evaluation.get("profile_completeness", 0),
+                "profileVersion": evaluation.get("profile_version", "1.0"),
+                
+                # User metadata
+                "isPsychometricAnalysisDone": user.get("isPsychometricAnalysisDone", False),
+                "psychometricCompletedAt": user.get("psychometricCompletedAt"),
+                "creditQuota": user.get("creditQuota", 0),
+                "isActive": user.get("isActive", True)
+            }
+            
+            results.append(result)
+        
+        # Sort by assessment date (newest first)
+        results.sort(key=lambda x: x.get("assessmentDate", ""), reverse=True)
+        
+        print(f"   Returning {len(results)} innovator insights")
+        print("=" * 80)
+        
+        return jsonify({
+            "success": True,
+            "data": results,
+            "total": len(results)
+        }), 200
+        
+    except Exception as e:
+        print("=" * 80)
+        print(f"❌ ERROR in get_innovator_psychometric_insights: {type(e).__name__}")
+        print(f"❌ Message: {str(e)}")
+        print("=" * 80)
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "error": "Failed to fetch innovator insights",
+            "details": str(e)
         }), 500

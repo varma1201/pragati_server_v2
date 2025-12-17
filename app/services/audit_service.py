@@ -17,6 +17,7 @@ class AuditService:
     CATEGORY_CREDIT = "Credit Transactions"
     CATEGORY_CONSULTATION = "Consultations"
     CATEGORY_SYSTEM = "System"
+    CATEGORY_PAYMENT = "Payment"
     
     @staticmethod
     def log_action(

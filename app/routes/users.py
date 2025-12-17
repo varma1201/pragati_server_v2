@@ -79,7 +79,7 @@ def get_user_by_id(user_id):
 # 3. LIST USERS - Get users with filtering
 # -------------------------------------------------------------------------
 
-@users_bp.route('/', methods=['GET'], strict_slashes=False)  # ✅ Different route - no parameter
+@users_bp.route('/', methods=['GET'], strict_slashes=False)
 @requires_role(["super_admin", "college_admin", "ttc_coordinator"])
 def list_users():
     """List users with optional filters"""
@@ -87,22 +87,55 @@ def list_users():
     college_id = request.args.get("college_id")
     ttc_id = request.args.get("ttc_id")
     
+    print("=" * 80)
+    print("📋 LIST USERS REQUEST")
+    print(f"   role_filter: {role_filter}")
+    print(f"   college_id: {college_id}")
+    print(f"   ttc_id: {ttc_id}")
+    
     query = {"isDeleted": {"$ne": True}}
     
+    # Apply role filter
     if role_filter:
         query["role"] = role_filter
     
+    # Filter: Get TTC Coordinators of a specific college
     if college_id and not ttc_id:
-        query.update({"role": "ttc_coordinator", "collegeId": college_id})
+        query["role"] = "ttc_coordinator"
+        query["collegeId"] = college_id  # ✅ String
     
+    # Filter: Get Innovators under a specific TTC in a college
     if college_id and ttc_id:
-        query.update({"role": "innovator", "collegeId": college_id, "createdBy": ttc_id})
- 
-    cursor = users_coll.find(query, {"password": 0})
+        # Convert ttc_id to ObjectId
+        try:
+            if isinstance(ttc_id, str):
+                ttc_id_obj = ObjectId(ttc_id)
+            else:
+                ttc_id_obj = ttc_id
+        except Exception as e:
+            print(f"❌ Invalid TTC ID: {e}")
+            return jsonify({"error": "Invalid TTC ID format"}), 400
+        
+        query["role"] = "innovator"
+        query["collegeId"] = college_id      # ✅ String
+        query["createdBy"] = ttc_id_obj      # ✅ ObjectId
+    
+    print(f"   Query: {query}")
+    
+    # Get total count first
+    total = users_coll.count_documents(query)
+    print(f"   Total matching: {total}")
+    
+    # Execute query
+    cursor = users_coll.find(query, {"password": 0}).sort("createdAt", -1)
+    docs = [clean_doc(doc) for doc in cursor]
+    
+    print("=" * 80)
     
     return jsonify({
-        "docs": [clean_doc(doc) for doc in cursor],
-        "success": True
+        "docs": docs,
+        "success": True,
+        "total": total
     }), 200
 
 

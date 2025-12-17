@@ -318,20 +318,44 @@ def update_user(uid):
     caller_id = request.user_id
     caller_role = request.user_role
     
+    # ✅ Convert UIDs to ObjectId
+    try:
+        if isinstance(uid, str):
+            uid_obj = ObjectId(uid)
+        else:
+            uid_obj = uid
+            
+        if isinstance(caller_id, str):
+            caller_id_obj = ObjectId(caller_id)
+        else:
+            caller_id_obj = caller_id
+    except Exception as e:
+        return jsonify({"error": "Invalid user ID format"}), 400
+    
     # Get caller's full details
-    caller = users_coll.find_one({"_id": caller_id})
+    caller = users_coll.find_one({"_id": caller_id_obj})
     if not caller:
         return jsonify({"error": "Caller not found"}), 404
     
-    caller_college = caller.get("collegeId")
+    # ✅ FIX: Get caller's college correctly based on role
+    if caller_role == "college_admin":
+        caller_college = str(caller_id_obj)  # Principal's _id IS the collegeId
+    else:
+        caller_college = caller.get("collegeId")
 
     # 1. Load target
-    target = users_coll.find_one({"_id": uid, "isDeleted": {"$ne": True}})
+    target = users_coll.find_one({"_id": uid_obj, "isDeleted": {"$ne": True}})
     if not target:
         return jsonify({"error": "User not found"}), 404
 
     target_role = target["role"]
-    target_college = target.get("collegeId")
+    
+    # ✅ FIX: Get target's college correctly based on role
+    if target_role == "college_admin":
+        target_college = str(target["_id"])  # Their _id IS the collegeId
+    else:
+        target_college = target.get("collegeId")
+    
     target_created_by = target.get("createdBy")
 
     # 2. Authorization matrix
@@ -341,16 +365,16 @@ def update_user(uid):
         ok = True
     elif caller_role == "college_admin":
         # Can edit self, or anyone in their college
-        ok = (uid == caller_id) or (target_college == caller_college)
+        ok = (uid_obj == caller_id_obj) or (target_college == caller_college)
     elif caller_role == "ttc_coordinator":
         # Can edit self, or innovators/mentors they created
-        ok = (uid == caller_id) or (
+        ok = (uid_obj == caller_id_obj) or (
             target_role in ["innovator", "internal_mentor"] and 
-            target_created_by == caller_id
+            str(target_created_by) == str(caller_id_obj)  # ✅ Compare as strings
         )
-    elif caller_role in ["innovator", "internal_mentor"]:
+    elif caller_role in ["innovator", "internal_mentor", "individual_innovator"]:
         # Can only edit themselves
-        ok = (uid == caller_id)
+        ok = (uid_obj == caller_id_obj)
     else:
         ok = False
 
@@ -392,7 +416,7 @@ def update_user(uid):
     if "email" in updates:
         existing = users_coll.find_one({
             "email": updates["email"], 
-            "_id": {"$ne": uid}
+            "_id": {"$ne": uid_obj}  # ✅ Use ObjectId
         })
         if existing:
             return jsonify({"error": "Email already in use"}), 409
@@ -403,10 +427,24 @@ def update_user(uid):
     updates["updatedAt"] = datetime.now(timezone.utc)
     
     # Perform update
-    users_coll.update_one({"_id": uid}, {"$set": updates})
+    users_coll.update_one({"_id": uid_obj}, {"$set": updates})  # ✅ Use ObjectId
 
     # Get updated user
-    updated_user = users_coll.find_one({"_id": uid}, {"password": 0})
+    updated_user = users_coll.find_one({"_id": uid_obj}, {"password": 0})  # ✅ Use ObjectId
+    
+    # ✅ Log audit
+    from app.services.audit_service import AuditService
+    AuditService.log_action(
+        actor_id=caller_id_obj,
+        action=f"Updated user profile: {target.get('name', 'Unknown')}",
+        category=AuditService.CATEGORY_USER_MGMT,
+        target_id=str(uid_obj),
+        target_type="user",
+        metadata={
+            "updatedFields": list(updates.keys()),
+            "targetRole": target_role
+        }
+    )
 
     return jsonify({
         "success": True,

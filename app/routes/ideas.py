@@ -1951,10 +1951,13 @@ def get_my_consultations():
     print(f"📄 Page: {page}, Limit: {limit}, Skip: {skip}")
 
     # Build query based on role
-    if caller_role == 'innovator':
-        print(f"\n📋 MODE: INNOVATOR")
-        query = {**query, **normalize_any_id_field("innovatorId", caller_id)}
-        print(f"   🔍 Query: {query}")
+    if caller_role == "innovator" or caller_role == "individual_innovator":
+        # Innovators see consultations for their ideas
+        query = {
+            "ideaOwnerId": caller_id,
+            "isDeleted": {"$ne": True}
+        }
+        print(f"🎯 Query for innovator: {query}")
         
     elif caller_role == 'ttc_coordinator':
         print(f"\n📋 MODE: TTC COORDINATOR")
@@ -2195,8 +2198,14 @@ def get_consultation_details(idea_id):
         return jsonify({"error": "Consultation not found"}), 404
 
     # Authorization check
-    if caller_role == 'innovator' and not ids_match(idea.get('innovatorId'), caller_id):
-        return jsonify({"error": "Access denied"}), 403
+    if caller_role == "innovator" or caller_role == "individual_innovator":
+        # Innovators see consultations for their ideas
+        query = {
+            "ideaOwnerId": caller_id,
+            "isDeleted": {"$ne": True}
+        }
+        print(f"🎯 Query for innovator: {query}")
+
 
     if caller_role == 'ttc_coordinator':
         innovator_ids = users_coll.distinct("_id", {
