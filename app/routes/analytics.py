@@ -9,6 +9,70 @@ from app.utils.id_helpers import find_user, ids_match
 
 analytics_bp = Blueprint('analytics', __name__, url_prefix='/api/analytics')
 
+def get_innovator_ids_for_role(caller_id, caller_role):
+    """
+    Get innovator ObjectIds based on caller role.
+    
+    Data hierarchy:
+    - College Admin (_id) 
+      └─> TTCs (collegeId = admin._id as STRING)
+          └─> Innovators (ttcCoordinatorId = ttc._id as STRING)
+              └─> Ideas (innovatorId = innovator._id as ObjectId)
+    """
+    # Ensure caller_id is ObjectId
+    if isinstance(caller_id, str):
+        caller_id = ObjectId(caller_id)
+    
+    caller_id_str = str(caller_id)
+    
+    if caller_role == 'ttc_coordinator':
+        # ✅ Direct: Get innovators with ttcCoordinatorId = this TTC's _id (as string)
+        innovator_ids = users_coll.distinct("_id", {
+            "ttcCoordinatorId": caller_id_str,  # Stored as STRING
+            "role": {"$in": ["innovator", "individual_innovator"]},
+            "isDeleted": {"$ne": True}
+        })
+        print(f"🔍 TTC {caller_id_str}: Found {len(innovator_ids)} innovators")
+        return innovator_ids
+    
+    elif caller_role == 'college_admin':
+        # ✅ Two-step: College Admin -> TTCs -> Innovators
+        print(f"🔍 College Admin: {caller_id_str}")
+        
+        # Step 1: Find all TTCs in this college
+        ttc_ids = users_coll.distinct("_id", {
+            "collegeId": caller_id_str,  # Stored as STRING
+            "role": "ttc_coordinator",
+            "isDeleted": {"$ne": True}
+        })
+        
+        print(f"  ├─ Found {len(ttc_ids)} TTCs")
+        
+        if not ttc_ids:
+            return []
+        
+        # Step 2: Find all innovators under these TTCs
+        ttc_ids_str = [str(tid) for tid in ttc_ids]
+        innovator_ids = users_coll.distinct("_id", {
+            "ttcCoordinatorId": {"$in": ttc_ids_str},  # STRING array
+            "role": {"$in": ["innovator", "individual_innovator"]},
+            "isDeleted": {"$ne": True}
+        })
+        
+        print(f"  └─ Found {len(innovator_ids)} innovators")
+        return innovator_ids
+    
+    elif caller_role == 'super_admin':
+        # All innovators
+        innovator_ids = users_coll.distinct("_id", {
+            "role": {"$in": ["innovator", "individual_innovator"]},
+            "isDeleted": {"$ne": True}
+        })
+        print(f"🔍 Super Admin: Found {len(innovator_ids)} total innovators")
+        return innovator_ids
+    
+    else:
+        return []
 
 # -------------------------------------------------------------------------
 # 1. DOMAIN TREND - Shows idea distribution by domain
@@ -17,22 +81,28 @@ analytics_bp = Blueprint('analytics', __name__, url_prefix='/api/analytics')
 @requires_auth()
 def domain_trend():
     """Domain-wise idea counts"""
-    caller = request.token_payload
-    caller_role = caller.get('role')
-    caller_id = caller.get('uid')
+    caller_id = request.user_id
+    caller_role = request.user_role
     
-    # Build match stage based on role
-    if caller_role == 'ttc_coordinator':
-        # Only ideas created by innovators under this coordinator
-        innovator_ids = users_coll.distinct("_id", {"createdBy": caller_id, "role": "innovator"})
-        match_stage = {"userId": {"$in": [str(uid) for uid in innovator_ids]}, "isDeleted": {"$ne": True}}
-    elif caller_role in ['college_admin', 'super_admin']:
-        match_stage = {"isDeleted": {"$ne": True}}
-    elif caller_role == 'innovator':
-        # Only caller's own ideas
-        match_stage = {"userId": caller_id, "isDeleted": {"$ne": True}}
+    print(f"\n📊 Domain Trend: Role={caller_role}, ID={caller_id}")
+    
+    if caller_role in ['innovator', 'individual_innovator']:
+        # Convert to ObjectId for innovator query
+        if isinstance(caller_id, str):
+            caller_id = ObjectId(caller_id)
+        match_stage = {"innovatorId": caller_id, "isDeleted": {"$ne": True}}
     else:
-        return jsonify({"error": "Unknown role"}), 403
+        # Get innovators based on role hierarchy
+        innovator_ids = get_innovator_ids_for_role(caller_id, caller_role)
+        if not innovator_ids:
+            print("⚠️ No innovators found")
+            return jsonify({"success": True, "data": []}), 200
+        
+        # ✅ Use ObjectId array for innovatorId query
+        match_stage = {
+            "innovatorId": {"$in": innovator_ids},  # Already ObjectIds
+            "isDeleted": {"$ne": True}
+        }
     
     pipeline = [
         {"$match": match_stage},
@@ -42,6 +112,7 @@ def domain_trend():
     ]
     
     data = list(ideas_coll.aggregate(pipeline))
+    print(f"✅ Returning {len(data)} domains\n")
     return jsonify({"success": True, "data": data}), 200
 
 
@@ -73,212 +144,175 @@ def college_domain_trend(collegeId):
     data = list(ideas_coll.aggregate(pipeline))
     return jsonify({"success": True, "data": data}), 200
 
-
-# -------------------------------------------------------------------------
-# 3. IDEA QUALITY TREND - Monthly average scores
-# -------------------------------------------------------------------------
 @analytics_bp.route('/idea-quality-trend', methods=['GET'])
-@requires_role(['ttc_coordinator', 'college_admin'])
+@requires_role(['ttc_coordinator', 'college_admin', 'super_admin'])
 def idea_quality_trend():
-    """Monthly idea quality trends"""
-    # ✅ FIX
+    """Monthly average scores"""
     caller_id = request.user_id
     caller_role = request.user_role
     
-    # Get innovator IDs based on role
-    if caller_role == 'ttc_coordinator':
-        innovator_ids = users_coll.distinct("_id", {"createdBy": caller_id, "role": "innovator"})
-    else:  # college_admin
-        innovator_ids = users_coll.distinct("_id", {"collegeId": caller_id, "role": "innovator"})
+    innovator_ids = get_innovator_ids_for_role(caller_id, caller_role)
+    if not innovator_ids:
+        return jsonify({"success": True, "data": []}), 200
     
     pipeline = [
-        {"$match": {"userId": {"$in": [str(uid) for uid in innovator_ids]}, "isDeleted": {"$ne": True}}},
-        {"$addFields": {
-            "month": {"$dateToString": {"format": "%b", "date": "$createdAt"}}
-        }},
-        {"$group": {
-            "_id": "$month",
-            "quality": {"$avg": "$overallScore"}
-        }},
+        {
+            "$match": {
+                "innovatorId": {"$in": innovator_ids},
+                "isDeleted": {"$ne": True},
+                "overallScore": {"$exists": True, "$ne": None}
+            }
+        },
+        {
+            "$addFields": {
+                "month": {"$dateToString": {"format": "%b", "date": "$createdAt"}}
+            }
+        },
+        {
+            "$group": {
+                "_id": "$month",
+                "quality": {"$avg": "$overallScore"}
+            }
+        },
         {"$sort": {"_id": 1}}
     ]
     
     raw = list(ideas_coll.aggregate(pipeline))
-    
-    # Format with standard month order
     month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     mapped = {m['_id']: round(m['quality'], 2) for m in raw}
     data = [{"month": m, "quality": mapped.get(m, 0)} for m in month_order]
     
     return jsonify({"success": True, "data": data}), 200
 
-
-# -------------------------------------------------------------------------
-# 4. CATEGORY SUCCESS - Ideas by approval status per domain
-# -------------------------------------------------------------------------
+# =====================================================================
+# 3. CATEGORY SUCCESS
+# =====================================================================
 @analytics_bp.route('/category-success', methods=['GET'])
-@requires_role(['ttc_coordinator', 'college_admin'])
+@requires_role(['ttc_coordinator', 'college_admin', 'super_admin'])
 def category_success():
-    """Success breakdown by domain"""
-    # ✅ FIX
+    """Ideas by status per domain"""
     caller_id = request.user_id
     caller_role = request.user_role
     
-    # Get innovator IDs
-    if caller_role == 'ttc_coordinator':
-        innovator_ids = users_coll.distinct("_id", {"createdBy": caller_id, "role": "innovator"})
-    else:  # college_admin
-        innovator_ids = users_coll.distinct("_id", {"collegeId": caller_id, "role": "innovator"})
+    innovator_ids = get_innovator_ids_for_role(caller_id, caller_role)
+    if not innovator_ids:
+        return jsonify({"success": True, "data": []}), 200
     
     pipeline = [
-        {"$match": {"userId": {"$in": [str(uid) for uid in innovator_ids]}, "isDeleted": {"$ne": True}}},
-        {"$group": {
-            "_id": "$domain",
-            "approved": {"$sum": {"$cond": [{"$gte": ["$overallScore", 80]}, 1, 0]}},
-            "moderate": {"$sum": {"$cond": [{"$and": [
-                {"$gte": ["$overallScore", 50]},
-                {"$lt": ["$overallScore", 80]}
-            ]}, 1, 0]}},
-            "rejected": {"$sum": {"$cond": [{"$lt": ["$overallScore", 50]}, 1, 0]}}
-        }},
-        {"$project": {
-            "_id": 0,
-            "category": "$_id",
-            "approved": 1,
-            "moderate": 1,
-            "rejected": 1
-        }}
+        {"$match": {"innovatorId": {"$in": innovator_ids}, "isDeleted": {"$ne": True}}},
+        {
+            "$group": {
+                "_id": "$domain",
+                "approved": {"$sum": {"$cond": [{"$gte": ["$overallScore", 80]}, 1, 0]}},
+                "moderate": {"$sum": {"$cond": [
+                    {"$and": [{"$gte": ["$overallScore", 50]}, {"$lt": ["$overallScore", 80]}]},
+                    1, 0
+                ]}},
+                "rejected": {"$sum": {"$cond": [{"$lt": ["$overallScore", 50]}, 1, 0]}}
+            }
+        },
+        {"$project": {"_id": 0, "category": "$_id", "approved": 1, "moderate": 1, "rejected": 1}}
     ]
     
     data = list(ideas_coll.aggregate(pipeline))
     return jsonify({"success": True, "data": data}), 200
 
-
-# -------------------------------------------------------------------------
-# 5. TOP INNOVATORS - Highest scoring innovators
-# -------------------------------------------------------------------------
+# =====================================================================
+# 4. TOP INNOVATORS
+# =====================================================================
 @analytics_bp.route('/top-innovators', methods=['GET'])
-@requires_role(['ttc_coordinator', 'college_admin'])
+@requires_role(['ttc_coordinator', 'college_admin', 'super_admin'])
 def top_innovators():
-    """Top 5 performing innovators"""
+    """Top 5 innovators by average score"""
     caller_id = request.user_id
     caller_role = request.user_role
     
-    # Get innovator IDs based on role
-    if caller_role == 'ttc_coordinator':
-        innovator_ids = users_coll.distinct("_id", {"createdBy": caller_id, "role": "innovator"})
-    elif caller_role == 'college_admin':
-        innovator_ids = users_coll.distinct("_id", {"collegeId": caller_id, "role": "innovator"})
-    else:
-        return jsonify([]), 200
-    
-    # Defensive check
+    innovator_ids = get_innovator_ids_for_role(caller_id, caller_role)
     if not innovator_ids:
-        return jsonify([]), 200
+        return jsonify({"success": True, "data": []}), 200
     
     pipeline = [
-        {"$match": {"userId": {"$in": [str(uid) for uid in innovator_ids]}, "isDeleted": {"$ne": True}}},
-        {"$group": {
-            "_id": "$userId",
-            "avgScore": {"$avg": "$overallScore"},
-            "ideaCount": {"$sum": 1}
-        }},
+        {
+            "$match": {
+                "innovatorId": {"$in": innovator_ids},
+                "isDeleted": {"$ne": True},
+                "overallScore": {"$exists": True, "$ne": None}
+            }
+        },
+        {
+            "$group": {
+                "_id": "$innovatorId",
+                "avgScore": {"$avg": "$overallScore"},
+                "ideaCount": {"$sum": 1}
+            }
+        },
         {"$sort": {"avgScore": -1}},
         {"$limit": 5},
-        {"$lookup": {
-            "from": "users",
-            "localField": "_id",
-            "foreignField": "_id",
-            "as": "user"
-        }},
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "_id",
+                "foreignField": "_id",
+                "as": "user"
+            }
+        },
         {"$unwind": "$user"},
-        {"$project": {
-            "_id": 0,
-            "name": "$user.name",
-            "score": "$avgScore"
-        }}
+        {"$project": {"_id": 0, "name": "$user.name", "score": {"$round": ["$avgScore", 2]}}}
     ]
     
     data = list(ideas_coll.aggregate(pipeline))
-    return jsonify(data), 200
+    return jsonify({"success": True, "data": data}), 200
 
-
-# -------------------------------------------------------------------------
-# 6. REJECTION REASONS - Most common rejection criteria
-# -------------------------------------------------------------------------
+# =====================================================================
+# 5. REJECTION REASONS
+# =====================================================================
 @analytics_bp.route('/rejection-reasons', methods=['GET'])
-@requires_role(['ttc_coordinator', 'college_admin'])
+@requires_role(['ttc_coordinator', 'college_admin', 'super_admin'])
 def rejection_reasons():
     """Top 4 rejection reasons"""
-    # ✅ FIX
     caller_id = request.user_id
     caller_role = request.user_role
     
-    # Get innovator IDs
-    if caller_role == 'ttc_coordinator':
-        innovator_ids = users_coll.distinct("_id", {"createdBy": caller_id, "role": "innovator"})
-    else:  # college_admin
-        innovator_ids = users_coll.distinct("_id", {"collegeId": caller_id, "role": "innovator"})
+    innovator_ids = get_innovator_ids_for_role(caller_id, caller_role)
+    if not innovator_ids:
+        return jsonify({"success": True, "data": [{"name": "No data", "value": 1}]}), 200
     
     pipeline = [
-        {"$match": {
-            "userId": {"$in": [str(uid) for uid in innovator_ids]},
-            "overallScore": {"$lt": 50},
-            "isDeleted": {"$ne": True}
-        }},
+        {
+            "$match": {
+                "innovatorId": {"$in": innovator_ids},
+                "overallScore": {"$lt": 50},
+                "isDeleted": {"$ne": True}
+            }
+        },
         {"$unwind": "$evaluatedData"},
         {"$match": {"evaluatedData.score": {"$lt": 50}}},
-        {"$group": {
-            "_id": "$evaluatedData.criterion",
-            "value": {"$sum": 1}
-        }},
+        {"$group": {"_id": "$evaluatedData.criterion", "value": {"$sum": 1}}},
         {"$sort": {"value": -1}},
         {"$limit": 4},
-        {"$project": {
-            "_id": 0,
-            "name": "$_id",
-            "value": 1,
-            "fill": {
-                "$switch": {
-                    "branches": [
-                        {"case": {"$eq": ["$_id", "Low Market Need"]}, "then": "hsl(var(--color-rejected))"},
-                        {"case": {"$eq": ["$_id", "Technical Feasibility"]}, "then": "hsl(var(--chart-3))"},
-                        {"case": {"$eq": ["$_id", "Weak Business Model"]}, "then": "hsl(var(--chart-5))"},
-                        {"case": {"$eq": ["$_id", "Poor Team Fit"]}, "then": "hsl(var(--muted))"}
-                    ],
-                    "default": "hsl(var(--muted))"
-                }
-            }
-        }}
+        {"$project": {"_id": 0, "name": "$_id", "value": 1, "fill": "hsl(var(--chart-3))"}}
     ]
     
     data = list(ideas_coll.aggregate(pipeline))
-    
-    # If no rejections, return placeholder
     if not data:
-        data = [{"name": "No rejections yet", "value": 1, "fill": "hsl(var(--muted))"}]
+        data = [{"name": "No rejections", "value": 1, "fill": "hsl(var(--muted))"}]
     
     return jsonify({"success": True, "data": data}), 200
 
-
-# -------------------------------------------------------------------------
-# 7. INNOVATOR ENGAGEMENT - Active vs Invited innovators
-# -------------------------------------------------------------------------
+# =====================================================================
+# 6. INNOVATOR ENGAGEMENT
+# =====================================================================
 @analytics_bp.route('/innovator-engagement', methods=['GET'])
-@requires_role(['ttc_coordinator', 'college_admin'])
+@requires_role(['ttc_coordinator', 'college_admin', 'super_admin'])
 def innovator_engagement():
-    """Active vs invited innovators"""
-    # ✅ FIX - Replace the old code below
+    """Active vs inactive innovators"""
     caller_id = request.user_id
     caller_role = request.user_role
     
-    # Get innovator IDs based on role
-    if caller_role == 'ttc_coordinator':
-        innovator_ids = users_coll.distinct("_id", {"createdBy": caller_id, "role": "innovator"})
-    else:  # college_admin
-        innovator_ids = users_coll.distinct("_id", {"collegeId": caller_id, "role": "innovator"})
+    innovator_ids = get_innovator_ids_for_role(caller_id, caller_role)
+    if not innovator_ids:
+        return jsonify({"success": True, "data": []}), 200
     
-    # Count active vs invited
     active_cnt = users_coll.count_documents({
         "_id": {"$in": innovator_ids},
         "isActive": True,
@@ -294,58 +328,33 @@ def innovator_engagement():
     
     return jsonify({"success": True, "data": data}), 200
 
-
 # -------------------------------------------------------------------------
 # 8. INNOVATOR PERSONAL STATS - Overview metrics for innovator's dashboard
 # -------------------------------------------------------------------------
 @analytics_bp.route('/innovator/stats', methods=['GET'])
 @requires_role(['innovator', 'individual_innovator'])
 def innovator_personal_stats():
-    """Get personal statistics for the logged-in innovator"""
+    """Personal stats for innovator"""
     caller_id = request.user_id
     
-    # ✅ FIX: Convert caller_id to ObjectId if needed
     if isinstance(caller_id, str):
-        try:
-            caller_id = ObjectId(caller_id)
-        except:
-            return jsonify({"error": "Invalid user ID format"}), 400
+        caller_id = ObjectId(caller_id)
     
-    caller_id_str = str(caller_id)
-    
-    print(f"📊 Fetching stats for innovator: {caller_id}")
-    
-    # ✅ FIX: Query with both ObjectId and string to match all ideas
     ideas = list(ideas_coll.find({
-        "$or": [
-            {"innovatorId": caller_id},      # Try as ObjectId
-            {"innovatorId": caller_id_str}   # Try as string
-        ],
+        "innovatorId": caller_id,
         "isDeleted": {"$ne": True}
     }))
     
-    print(f"   Found {len(ideas)} total ideas")
-    
-    # Calculate stats
     total_ideas = len(ideas)
     validated_ideas = [idea for idea in ideas if idea.get('overallScore') is not None]
     
-    print(f"   Validated ideas: {len(validated_ideas)}")
-    
-    # Average score
     average_score = 0
     if validated_ideas:
         average_score = sum(idea['overallScore'] for idea in validated_ideas) / len(validated_ideas)
     
-    # Approval rate (score >= 80)
     approved_count = sum(1 for idea in validated_ideas if idea.get('overallScore', 0) >= 80)
-    
-    # ✅ FIX: Calculate approval rate based on validated ideas, not total ideas
     approval_rate = (approved_count / len(validated_ideas) * 100) if len(validated_ideas) > 0 else 0
     
-    print(f"   Approved: {approved_count}, Approval Rate: {approval_rate}%")
-    
-    # Ideas by status
     status_breakdown = {}
     for idea in ideas:
         status = idea.get('status', 'submitted')
@@ -362,7 +371,6 @@ def innovator_personal_stats():
             "statusBreakdown": status_breakdown
         }
     }), 200
-
 
 # -------------------------------------------------------------------------
 # 10. INNOVATOR CLUSTER PERFORMANCE - Spider chart data
@@ -588,19 +596,17 @@ def innovator_ideas_list():
 @analytics_bp.route('/college/ttc-performance', methods=['GET'])
 @requires_role(['college_admin'])
 def college_ttc_performance():
-    """Get performance comparison of TTCs in the college"""
+    """Compare TTCs in college"""
     caller_id = request.user_id
     
-    # Get caller's college
-    caller_user = users_coll.find_one({"_id": caller_id}, {"collegeId": 1})
-    if not caller_user or not caller_user.get('collegeId'):
-        return jsonify({"success": True, "data": []}), 200
-    
-    college_id = caller_user['collegeId']
+    if isinstance(caller_id, str):
+        caller_id_str = str(ObjectId(caller_id))
+    else:
+        caller_id_str = str(caller_id)
     
     # Get all TTCs in this college
     ttcs = list(users_coll.find({
-        "collegeId": college_id,
+        "collegeId": caller_id_str,
         "role": "ttc_coordinator",
         "isDeleted": {"$ne": True}
     }, {"_id": 1, "name": 1}))
@@ -608,20 +614,20 @@ def college_ttc_performance():
     if not ttcs:
         return jsonify({"success": True, "data": []}), 200
     
-    # Get performance for each TTC
     performance_data = []
-    
     for ttc in ttcs:
+        ttc_id_str = str(ttc['_id'])
+        
         # Get innovators under this TTC
         innovator_ids = users_coll.distinct("_id", {
-            "ttcCoordinatorId": ttc['_id'],
-            "role": "innovator",
+            "ttcCoordinatorId": ttc_id_str,
+            "role": {"$in": ["innovator", "individual_innovator"]},
             "isDeleted": {"$ne": True}
         })
         
-        # Get ideas from these innovators
+        # Get ideas
         ideas = list(ideas_coll.find({
-            "innovatorId": {"$in": [str(uid) for uid in innovator_ids]},
+            "innovatorId": {"$in": innovator_ids},
             "isDeleted": {"$ne": True}
         }))
         
@@ -630,21 +636,15 @@ def college_ttc_performance():
         approval_rate = (approved_ideas / total_ideas * 100) if total_ideas > 0 else 0
         
         performance_data.append({
-            "ttcId": ttc['_id'],
+            "ttcId": ttc_id_str,
             "name": ttc['name'],
             "ideas": total_ideas,
             "approved": approved_ideas,
             "approvalRate": round(approval_rate, 2)
         })
     
-    # Sort by ideas count
     performance_data.sort(key=lambda x: x['ideas'], reverse=True)
-    
-    return jsonify({
-        "success": True,
-        "data": performance_data
-    }), 200
-
+    return jsonify({"success": True, "data": performance_data}), 200
 
 # -------------------------------------------------------------------------
 # 13. COLLEGE SUMMARY STATS - Overview for college admin
@@ -652,45 +652,49 @@ def college_ttc_performance():
 @analytics_bp.route('/college/summary', methods=['GET'])
 @requires_role(['college_admin'])
 def college_summary():
-    """Get summary statistics for college admin dashboard"""
+    """Summary for college admin"""
     caller_id = request.user_id
     
-    # Get caller's college
-    caller_user = users_coll.find_one({"_id": caller_id}, {"collegeId": 1})
-    if not caller_user or not caller_user.get('collegeId'):
-        return jsonify({"success": True, "data": {}}), 200
+    if isinstance(caller_id, str):
+        caller_id = ObjectId(caller_id)
+    caller_id_str = str(caller_id)
     
-    college_id = caller_user['collegeId']
+    print(f"\n📊 College Summary for admin: {caller_id_str}")
     
-    # Count TTCs
+    # Count TTCs in this college
     ttc_count = users_coll.count_documents({
-        "collegeId": college_id,
+        "collegeId": caller_id_str,  # STRING
         "role": "ttc_coordinator",
         "isDeleted": {"$ne": True}
     })
+    print(f"  ├─ TTCs: {ttc_count}")
     
-    # Get all innovators in college
-    innovator_ids = users_coll.distinct("_id", {
-        "collegeId": college_id,
-        "role": "innovator",
-        "isDeleted": {"$ne": True}
-    })
+    # Get innovators via TTCs
+    innovator_ids = get_innovator_ids_for_role(caller_id, 'college_admin')
+    print(f"  ├─ Innovators: {len(innovator_ids)}")
     
-    # Get all ideas from college innovators
+    if not innovator_ids:
+        return jsonify({
+            "success": True,
+            "data": {
+                "totalTTCs": ttc_count,
+                "totalInnovators": 0,
+                "totalIdeas": 0,
+                "approvedIdeas": 0,
+                "approvalRate": 0
+            }
+        }), 200
+    
+    # Get ideas
     ideas = list(ideas_coll.find({
-        "innovatorId": {"$in": [str(uid) for uid in innovator_ids]},
+        "innovatorId": {"$in": innovator_ids},
         "isDeleted": {"$ne": True}
     }))
+    print(f"  └─ Ideas: {len(ideas)}\n")
     
     total_ideas = len(ideas)
     approved_ideas = sum(1 for idea in ideas if idea.get('overallScore', 0) >= 80)
     approval_rate = (approved_ideas / total_ideas * 100) if total_ideas > 0 else 0
-    
-    # Status breakdown
-    status_counts = {}
-    for idea in ideas:
-        status = idea.get('status', 'unknown')
-        status_counts[status] = status_counts.get(status, 0) + 1
     
     return jsonify({
         "success": True,
@@ -699,8 +703,7 @@ def college_summary():
             "totalInnovators": len(innovator_ids),
             "totalIdeas": total_ideas,
             "approvedIdeas": approved_ideas,
-            "approvalRate": round(approval_rate, 2),
-            "statusBreakdown": status_counts
+            "approvalRate": round(approval_rate, 2)
         }
     }), 200
 
@@ -807,9 +810,7 @@ def admin_college_distribution():
 @analytics_bp.route('/admin/summary', methods=['GET'])
 @requires_role(['super_admin'])
 def admin_summary():
-    """Get system-wide summary statistics"""
-    
-    # Count entities
+    """System-wide summary"""
     total_colleges = users_coll.count_documents({
         "role": "college_admin",
         "isDeleted": {"$ne": True}
@@ -821,42 +822,20 @@ def admin_summary():
     })
     
     total_innovators = users_coll.count_documents({
-        "role": "innovator",
+        "role": {"$in": ["innovator", "individual_innovator"]},
         "isDeleted": {"$ne": True}
     })
     
-    total_mentors = users_coll.count_documents({
-        "role": "internal_mentor",
-        "isDeleted": {"$ne": True}
-    })
-    
-    # Ideas stats
     total_ideas = ideas_coll.count_documents({"isDeleted": {"$ne": True}})
     
-    # Get ideas with scores
     ideas_with_scores = list(ideas_coll.find(
         {"overallScore": {"$exists": True, "$ne": None}, "isDeleted": {"$ne": True}},
-        {"overallScore": 1, "submittedAt": 1, "updatedAt": 1}
+        {"overallScore": 1}
     ))
     
     approved_ideas = sum(1 for idea in ideas_with_scores if idea.get('overallScore', 0) >= 80)
     approval_rate = (approved_ideas / total_ideas * 100) if total_ideas > 0 else 0
-    
     avg_score = sum(idea.get('overallScore', 0) for idea in ideas_with_scores) / len(ideas_with_scores) if ideas_with_scores else 0
-    
-    # Calculate validation times (in days)
-    validation_times = []
-    for idea in ideas_with_scores:
-        if idea.get('submittedAt') and idea.get('updatedAt'):
-            submitted = idea['submittedAt']
-            updated = idea['updatedAt']
-            delta = (updated - submitted).days
-            if delta >= 0:  # Only positive values
-                validation_times.append(delta)
-    
-    avg_validation_time = sum(validation_times) / len(validation_times) if validation_times else 0
-    max_validation_time = max(validation_times) if validation_times else 0
-    min_validation_time = min(validation_times) if validation_times else 0
     
     return jsonify({
         "success": True,
@@ -864,19 +843,12 @@ def admin_summary():
             "totalColleges": total_colleges,
             "totalTTCs": total_ttcs,
             "totalInnovators": total_innovators,
-            "totalMentors": total_mentors,
             "totalIdeas": total_ideas,
             "approvedIdeas": approved_ideas,
             "approvalRate": round(approval_rate, 2),
-            "avgScore": round(avg_score, 2),
-            "validationMetrics": {
-                "avgDays": round(avg_validation_time, 1),
-                "maxDays": max_validation_time,
-                "minDays": min_validation_time
-            }
+            "avgScore": round(avg_score, 2)
         }
     }), 200
-
 
 # -------------------------------------------------------------------------
 # 17. SUPER ADMIN - Export Data

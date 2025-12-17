@@ -7,6 +7,8 @@ from app.services.psychometric_service import PsychometricService
 from bson import ObjectId
 from app.utils.validators import normalize_user_id, normalize_any_id_field, clean_doc, get_user_by_any_id
 from app.utils.id_helpers import find_user, ids_match
+from app.services.audit_service import AuditService
+
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/api/admin')
 

@@ -153,6 +153,15 @@ def request_mentor():
         }
     )
     print("✅ Notification created")
+
+    AuditService.log_action(
+    actor_id=innovator_id,
+        action=f"Requested mentor: {mentor.get('name')}",
+        category=AuditService.CATEGORY_CONSULTATION,
+        target_id=request_id,
+        target_type="mentor_request",
+        metadata={"mentorId": mentor_id, "draftTitle": draft.get('title')}
+    )
     
     # Email mentor
     print("📧 Preparing email to mentor")
@@ -270,6 +279,15 @@ def accept_mentor_request(request_id):
             'mentorName': mentor_request['mentorName'],
             'ideaTitle': draft.get('title', 'Your Idea') if draft else 'Your Idea'
         }
+    )
+
+    AuditService.log_action(
+        actor_id=mentor_id,
+        action=f"Accepted mentor request from {innovator.get('name')}",
+        category=AuditService.CATEGORY_CONSULTATION,
+        target_id=request_id,
+        target_type="mentor_request",
+        metadata={"innovatorId": innovator_id, "draftTitle": draft.get('title')}
     )
     
     # Send acceptance email
@@ -389,6 +407,15 @@ def reject_mentor_request(request_id):
                 "mentorEmail": ""
             }
         }
+    )
+
+    AuditService.log_action(
+        actor_id=mentor_id,
+        action=f"Rejected mentor request from {innovator.get('name')}",
+        category=AuditService.CATEGORY_CONSULTATION,
+        target_id=request_id,
+        target_type="mentor_request",
+        metadata={"innovatorId": innovator_id, "reason": rejection_reason}
     )
     
     # Notify innovator

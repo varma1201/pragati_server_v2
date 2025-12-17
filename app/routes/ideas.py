@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from app.middleware.auth import requires_role, requires_auth
-from app.database.mongo import ideas_coll, drafts_coll, users_coll, psychometric_assessments_coll, team_invitations_coll, consultation_requests_coll
+from app.database.mongo import ideas_coll, drafts_coll, users_coll, psychometric_assessments_coll, team_invitations_coll, consultation_requests_coll, results_coll
 from app.utils.validators import clean_doc, parse_oid, normalize_user_id, normalize_any_id_field
 from app.utils.id_helpers import find_user, ids_match
 from app.services.notification_service import NotificationService
@@ -12,6 +12,8 @@ import os
 from werkzeug.utils import secure_filename
 import mimetypes
 from bson import ObjectId
+from app.services.audit_service import AuditService
+
 
 ideas_bp = Blueprint('ideas', __name__, url_prefix='/api/ideas')
 
@@ -723,6 +725,12 @@ def submit_idea():
     print(f"✅ {notification_count} stakeholders notified")
     print(f"✅ Idea submitted successfully: {idea_title}")
     print("="*80)
+
+    AuditService.log_idea_submitted(
+        actor_id=uid,
+        idea_id=idea_id,
+        idea_title=idea_title
+    )
     
     return jsonify({
         "success": True,
@@ -1413,6 +1421,13 @@ def assign_consultation(idea_id):
                     except Exception as e:
                         print(f"⚠️ Failed to notify team member: {e}")
 
+        AuditService.log_consultation_assigned(
+            actor_id=request.user_id,
+            idea_id=idea_id,
+            idea_title=idea.get('title'),
+            mentor_name=mentor.get('name')
+        )
+
         return jsonify({
             "success": True,
             "message": f"Consultation assigned successfully. {notification_count} stakeholders notified.",
@@ -1607,6 +1622,15 @@ def reschedule_consultation(idea_id):
 
         print(f"   📊 Total notifications sent: {notification_count}")
         print("=" * 80)
+
+        AuditService.log_action(
+            actor_id=caller_id,
+            action=f"Rescheduled consultation for: {idea.get('title')}",
+            category=AuditService.CATEGORY_CONSULTATION,
+            target_id=idea_id,
+            target_type="consultation",
+            metadata={"oldDate": old_date, "newDate": new_date, "reason": reason}
+        )
 
         return jsonify({
             "success": True,
@@ -1812,6 +1836,14 @@ def delete_idea(idea_id):
         {"$set": {"isDeleted": True, "deletedAt": datetime.now(timezone.utc)}}
     )
 
+    AuditService.log_action(
+        actor_id=caller_id,
+        action=f"Deleted idea: {idea.get('title')}",
+        category=AuditService.CATEGORY_IDEA,
+        target_id=idea_id,
+        target_type="idea"
+    )
+
     return jsonify({
         "success": True,
         "message": "Idea deleted successfully"
@@ -1852,6 +1884,14 @@ def update_idea(idea_id):
     ideas_coll.update_one(
         {"_id": idea_id},
         {"$set": update_fields}
+    )
+
+    AuditService.log_action(
+        actor_id=caller_id,
+        action=f"Updated idea: {idea_doc.get('title')}",
+        category=AuditService.CATEGORY_IDEA,
+        target_id=idea_id,
+        target_type="idea"
     )
 
     return jsonify({
@@ -1903,53 +1943,187 @@ def get_my_consultations():
 
     query = {"isDeleted": {"$ne": True}}
 
-    print(f"🔍 Consultation API called by: {caller_id} (role: {caller_role})")
+    print("\n" + "=" * 80)
+    print(f"📞 CONSULTATIONS API CALLED")
+    print("=" * 80)
+    print(f"🔑 Caller ID: {caller_id} (type: {type(caller_id)})")
+    print(f"👤 Caller Role: {caller_role}")
+    print(f"📄 Page: {page}, Limit: {limit}, Skip: {skip}")
 
     # Build query based on role
     if caller_role == 'innovator':
+        print(f"\n📋 MODE: INNOVATOR")
         query = {**query, **normalize_any_id_field("innovatorId", caller_id)}
+        print(f"   🔍 Query: {query}")
+        
     elif caller_role == 'ttc_coordinator':
-        innovator_ids = users_coll.distinct("_id", {
+        print(f"\n📋 MODE: TTC COORDINATOR")
+        
+        # Step 1: Find innovators
+        innovator_query = {
             **normalize_any_id_field("ttcCoordinatorId", caller_id),
             "role": "innovator"
-        })
+        }
+        print(f"   🔍 Looking for innovators with query: {innovator_query}")
+        
+        innovator_ids = users_coll.distinct("_id", innovator_query)
+        print(f"   ✅ Found {len(innovator_ids)} innovators")
+        print(f"   📝 Innovator IDs (ObjectId): {innovator_ids}")
+        
+        if len(innovator_ids) > 0:
+            # Get innovator details
+            innovators_details = list(users_coll.find(
+                {"_id": {"$in": innovator_ids}},
+                {"name": 1, "email": 1, "_id": 1}
+            ))
+            print(f"\n   👥 Innovators:")
+            for inv in innovators_details:
+                print(f"      - {inv.get('name')} ({inv.get('email')}) | ID: {inv['_id']}")
+            
+            # Step 2: Check all ideas for these innovators (before filtering by consultation)
+            print(f"\n   🔍 Checking ALL ideas for these innovators...")
+            all_ideas_query = {
+                "innovatorId": {"$in": innovator_ids},
+                "isDeleted": {"$ne": True}
+            }
+            print(f"      Query: {all_ideas_query}")
+            
+            all_ideas = list(ideas_coll.find(
+                all_ideas_query,
+                {"title": 1, "innovatorId": 1, "userId": 1, "consultationMentorId": 1, "consultationStatus": 1, "_id": 1}
+            ))
+            print(f"      ✅ Found {len(all_ideas)} total ideas (with or without consultation)")
+            
+            if len(all_ideas) > 0:
+                print(f"\n      💡 Ideas breakdown:")
+                with_consultation = 0
+                without_consultation = 0
+                
+                for idea in all_ideas:
+                    has_consultation = bool(idea.get('consultationMentorId'))
+                    if has_consultation:
+                        with_consultation += 1
+                        print(f"         ✅ '{idea.get('title')}' | ID: {idea['_id']}")
+                        print(f"            innovatorId: {idea.get('innovatorId')}")
+                        print(f"            consultationMentorId: {idea.get('consultationMentorId')}")
+                        print(f"            consultationStatus: {idea.get('consultationStatus')}")
+                    else:
+                        without_consultation += 1
+                        print(f"         ❌ '{idea.get('title')}' | ID: {idea['_id']}")
+                        print(f"            innovatorId: {idea.get('innovatorId')}")
+                        print(f"            NO CONSULTATION ASSIGNED")
+                
+                print(f"\n      📊 Summary:")
+                print(f"         - Ideas WITH consultation: {with_consultation}")
+                print(f"         - Ideas WITHOUT consultation: {without_consultation}")
+            else:
+                print(f"\n      ⚠️ No ideas found for these innovators!")
+                print(f"\n      🔍 Checking if ideas use 'userId' instead of 'innovatorId'...")
+                
+                alt_ideas_query = {
+                    "userId": {"$in": innovator_ids},
+                    "isDeleted": {"$ne": True}
+                }
+                print(f"         Query: {alt_ideas_query}")
+                
+                alt_ideas = list(ideas_coll.find(
+                    alt_ideas_query,
+                    {"title": 1, "userId": 1, "consultationMentorId": 1}
+                ).limit(5))
+                
+                if len(alt_ideas) > 0:
+                    print(f"         ✅ Found {len(alt_ideas)} ideas using 'userId' field!")
+                    for idea in alt_ideas:
+                        print(f"            - '{idea.get('title')}' | userId: {idea.get('userId')} | consultation: {bool(idea.get('consultationMentorId'))}")
+                else:
+                    print(f"         ❌ No ideas found with 'userId' either")
+                    
+                    # Check sample ideas
+                    print(f"\n      🔍 Checking sample ideas in database...")
+                    sample_ideas = list(ideas_coll.find(
+                        {"isDeleted": {"$ne": True}},
+                        {"title": 1, "innovatorId": 1, "userId": 1, "_id": 1}
+                    ).limit(5))
+                    
+                    if len(sample_ideas) > 0:
+                        print(f"         Found {len(sample_ideas)} sample ideas:")
+                        for idea in sample_ideas:
+                            print(f"            - '{idea.get('title')}'")
+                            print(f"              innovatorId: {idea.get('innovatorId')} (type: {type(idea.get('innovatorId'))})")
+                            print(f"              userId: {idea.get('userId')} (type: {type(idea.get('userId'))})")
+        
+        # Final query for consultations
         query['innovatorId'] = {"$in": innovator_ids}
+        print(f"\n   🎯 Final ideas query (before consultation filter): {query}")
+        
     elif caller_role == 'college_admin':
-        # College admin sees all innovators in their college
+        print(f"\n📋 MODE: COLLEGE ADMIN")
         caller_user = find_user(caller_id)
         if caller_user and caller_user.get('collegeId'):
+            college_id = caller_user['collegeId']
+            print(f"   🏫 College ID: {college_id}")
+            
             innovator_ids = users_coll.distinct("_id", {
-                **normalize_any_id_field("collegeId", caller_user['collegeId']),
+                **normalize_any_id_field("collegeId", college_id),
                 "role": "innovator",
                 "isDeleted": {"$ne": True}
             })
+            print(f"   ✅ Found {len(innovator_ids)} innovators in college")
             query['innovatorId'] = {"$in": innovator_ids}
         else:
+            print(f"   ❌ No college ID found for admin")
             query['innovatorId'] = {"$in": []}
+            
     elif caller_role == 'super_admin':
-        # Super admin sees all
+        print(f"\n📋 MODE: SUPER ADMIN (all consultations)")
         pass
     else:
+        print(f"\n❌ ACCESS DENIED: Unknown role")
         return jsonify({"error": "Access denied"}), 403
 
     # Only ideas with consultations assigned
     query['consultationMentorId'] = {"$exists": True, "$ne": None}
-
-    print(f"🔍 Query: {query}")
+    
+    print(f"\n🔍 FINAL QUERY (with consultation filter): {query}")
 
     # Get total count
     total = ideas_coll.count_documents(query)
+    print(f"✅ Total consultations found: {total}")
 
     # Get paginated consultations
     cursor = ideas_coll.find(query).sort("consultationScheduledAt", -1).skip(skip).limit(limit)
 
     consultations = []
+    consultation_count = 0
+    
+    print(f"\n📦 Processing consultations...")
+    
     for idea in cursor:
+        consultation_count += 1
+        print(f"\n   {consultation_count}. Processing idea: '{idea.get('title')}'")
+        print(f"      ID: {idea['_id']}")
+        print(f"      innovatorId: {idea.get('innovatorId')}")
+        
         # Get innovator details
         innovator = find_user(idea.get("innovatorId"))
+        if innovator:
+            print(f"      ✅ Innovator found: {innovator.get('name')} ({innovator.get('email')})")
+        else:
+            print(f"      ⚠️ Innovator not found for ID: {idea.get('innovatorId')}")
 
         # Get mentor details
-        mentor = find_user(idea.get("consultationMentorId"))
+        mentor_id = idea.get('consultationMentorId')
+        print(f"      consultationMentorId: {mentor_id}")
+        
+        mentor = find_user(mentor_id)
+        if mentor:
+            print(f"      ✅ Mentor found: {mentor.get('name')} ({mentor.get('email')})")
+        else:
+            print(f"      ⚠️ Mentor not found for ID: {mentor_id}")
+
+        scheduled_at = idea.get('consultationScheduledAt')
+        print(f"      consultationScheduledAt: {scheduled_at}")
+        print(f"      consultationStatus: {idea.get('consultationStatus')}")
 
         # Format consultation data for UI
         consultation = {
@@ -1959,24 +2133,27 @@ def get_my_consultations():
             "innovatorId": str(idea.get('innovatorId')),
             "innovatorName": innovator.get('name') if innovator else 'Unknown',
             "innovatorEmail": innovator.get('email') if innovator else '',
-            "mentorId": str(idea.get('consultationMentorId')),
+            "mentorId": str(mentor_id) if mentor_id else '',
             "mentor": mentor.get('name') if mentor else 'Unknown',
             "mentorEmail": mentor.get('email') if mentor else '',
             "mentorOrganization": mentor.get('organization') if mentor else '',
             "domain": idea.get('domain', ''),
-            "date": idea.get('consultationScheduledAt').strftime("%Y-%m-%d") if idea.get('consultationScheduledAt') else '',
-            "time": idea.get('consultationScheduledAt').strftime("%H:%M") if idea.get('consultationScheduledAt') else '',
-            "scheduledAt": idea.get('consultationScheduledAt').isoformat() if idea.get('consultationScheduledAt') else '',
-            "status": idea.get('consultationStatus', 'assigned'),  # assigned, completed, cancelled, rescheduled
+            "date": scheduled_at.strftime("%Y-%m-%d") if scheduled_at else '',
+            "time": scheduled_at.strftime("%H:%M") if scheduled_at else '',
+            "scheduledAt": scheduled_at.isoformat() if scheduled_at else '',
+            "status": idea.get('consultationStatus', 'assigned'),
             "notes": idea.get('consultationNotes', ''),
             "overallScore": idea.get('overallScore'),
-            "agenda": [],  # Will be added from idea details
-            "pointsDiscussed": [],  # Will be filled after meeting
-            "actionItems": [],  # Will be filled after meeting
-            "files": [],  # For meeting minutes/attachments
+            "agenda": [],
+            "pointsDiscussed": [],
+            "actionItems": [],
+            "files": [],
             "createdAt": idea.get('createdAt').isoformat() if idea.get('createdAt') else '',
         }
         consultations.append(consultation)
+
+    print(f"\n✅ Returning {len(consultations)} consultations")
+    print("=" * 80 + "\n")
 
     return jsonify({
         "success": True,
@@ -2133,6 +2310,14 @@ def update_consultation_minutes(idea_id):
     if result.modified_count == 0:
         return jsonify({"error": "Failed to update consultation"}), 400
 
+    AuditService.log_action(
+        actor_id=caller_id,
+        action=f"Updated consultation minutes: {idea.get('title')}",
+        category=AuditService.CATEGORY_CONSULTATION,
+        target_id=idea_id,
+        target_type="consultation"
+    )
+
     return jsonify({
         "success": True,
         "message": "Consultation minutes updated successfully"
@@ -2149,7 +2334,7 @@ def request_consultation(idea_id):
     - TTC Coordinator: For their innovators' ideas
     
     Requirements:
-    - Idea must have score >= 85
+    - Idea must have score >= 85 (from results_coll)
     - No existing consultation or pending request
     """
     from bson import ObjectId
@@ -2219,16 +2404,34 @@ def request_consultation(idea_id):
     else:
         return jsonify({"error": "Access denied"}), 403
     
-    # ===== STEP 4: Validate score >= 85 =====
-    overall_score = idea.get('overallScore')
+    # ===== STEP 4: Validate score >= 85 (CHECK results_coll, not ideas_coll) =====
+    print(f"   🔍 Checking score in results_coll for idea: {str(idea_id_query)}")
     
-    if overall_score is None:
+    # ✅ FIX: Query results_coll where ideaId is stored as STRING
+    result = results_coll.find_one({
+        "ideaId": str(idea_id_query)  # ✅ ideaId is STRING in results_coll
+    })
+    
+    if not result:
+        print(f"   ❌ No result found in results_coll for idea {idea_id_query}")
         return jsonify({
             "error": "Score not available",
             "message": "The idea needs to be evaluated before requesting a consultation."
         }), 400
     
+    overall_score = result.get('overallScore')
+    
+    if overall_score is None:
+        print(f"   ❌ overallScore is None in result")
+        return jsonify({
+            "error": "Score not available",
+            "message": "The idea needs to be evaluated before requesting a consultation."
+        }), 400
+    
+    print(f"   ✅ Score found in results_coll: {overall_score}")
+    
     if overall_score < 85:
+        print(f"   ❌ Score too low: {overall_score} < 85")
         return jsonify({
             "error": "Score too low",
             "message": f"Consultations are only available for ideas with a score of 85 or above. Current score is {overall_score}.",
@@ -2244,6 +2447,8 @@ def request_consultation(idea_id):
             "error": "Consultation already assigned",
             "message": "This idea already has a consultation scheduled."
         }), 409
+    
+    print("   ✅ No existing consultation")
     
     # ===== STEP 6: Check if there's already a pending request =====
     existing_request = consultation_requests_coll.find_one({
@@ -2270,9 +2475,8 @@ def request_consultation(idea_id):
     except:
         pass
     
-    # ✅ FIX: Query MongoDB directly without normalize_user_id
     mentor = users_coll.find_one({
-        "_id": mentor_id_query,  # ✅ Direct _id field
+        "_id": mentor_id_query,
         "role": "mentor",
         "isDeleted": {"$ne": True},
         "isActive": True
@@ -2321,7 +2525,7 @@ def request_consultation(idea_id):
         "preferredDate": preferred_date,
         "questions": questions,
         "status": "pending",
-        "overallScore": overall_score,
+        "overallScore": overall_score,  # ✅ Use score from results_coll
         "requestedAt": datetime.now(timezone.utc),
         "createdAt": datetime.now(timezone.utc),
         "updatedAt": datetime.now(timezone.utc)
@@ -2354,14 +2558,13 @@ def request_consultation(idea_id):
                     "preferredDate": preferred_date.strftime("%Y-%m-%d %H:%M UTC"),
                     "overallScore": overall_score,
                     "requestId": str(request_id),
-                    "role": "super_admin",
-                    "message": f"New consultation request from {requester_name} ({requester_role_display})",
                 },
+                role="super_admin",
+                message=f"New consultation request from {requester_name} ({requester_role_display})",
             )
             notification_count += 1
         except Exception as e:
             print(f"⚠️ Failed to notify super admin {admin_id}: {e}")
-
     
     # ===== STEP 12: Notify innovator if TTC made the request =====
     if caller_role == "ttc_coordinator" and innovator_id:
@@ -2374,17 +2577,25 @@ def request_consultation(idea_id):
                     "ideaTitle": request_doc["ideaTitle"],
                     "mentorName": request_doc["mentorName"],
                     "preferredDate": preferred_date.strftime("%Y-%m-%d %H:%M UTC"),
-                    "role": "innovator",
-                    "message": f"Your TTC coordinator requested a consultation for '{request_doc['ideaTitle']}'",
                 },
+                role="innovator",
+                message=f"Your TTC coordinator requested a consultation for '{request_doc['ideaTitle']}'",
             )
             notification_count += 1
         except Exception as e:
             print(f"⚠️ Failed to notify innovator: {e}")
-
     
     print(f"   📊 Notified {notification_count} users")
     print("=" * 80)
+
+    AuditService.log_action(
+    actor_id=caller_id,
+            action=f"Requested consultation for: {idea.get('title')}",
+            category=AuditService.CATEGORY_CONSULTATION,
+            target_id=idea_id,
+            target_type="consultation",
+            metadata={"mentorId": mentor_id, "preferredDate": preferred_date}
+        )
     
     return jsonify({
         "success": True,
@@ -2406,6 +2617,12 @@ def get_eligible_ideas_for_consultation():
     """
     Get ideas eligible for consultation (score >= 85, no consultation assigned)
     
+    Flow:
+    1. Query results_coll for overallScore >= 85
+    2. Get ideaId from results (stored as STRING)
+    3. Fetch corresponding ideas from ideas_coll
+    4. Filter out ideas that already have consultations
+    
     - Innovator: Their own ideas
     - TTC Coordinator: Their innovators' ideas
     """
@@ -2413,67 +2630,235 @@ def get_eligible_ideas_for_consultation():
         caller_id = request.user_id
         caller_role = request.user_role
         
-        # Build query based on role
+        print("\n" + "=" * 80)
+        print(f"📋 ELIGIBLE IDEAS FOR CONSULTATION API")
+        print("=" * 80)
+        print(f"🔑 Caller ID: {caller_id}")
+        print(f"👤 Caller Role: {caller_role}")
+        
+        # ✅ STEP 1: Build query for results_coll to find ideas with score >= 85
         if caller_role in ['innovator', 'individual_innovator']:
-            query = {
-                "innovatorId": caller_id,
-                "isDeleted": {"$ne": True},
-                "overallScore": {"$gte": 85},
-                "consultationMentorId": {"$exists": False}  # No consultation assigned
-            }
-        elif caller_role == 'ttc_coordinator':
-            # Get all innovators under this TTC
-            innovator_ids = users_coll.distinct(
-                "_id",
-                {
-                    "ttcCoordinatorId": caller_id,
-                    "role": {"$in": ["innovator", "individual_innovator"]},
-                    "isDeleted": {"$ne": True}
-                }
-            )
+            # Get idea IDs created by this innovator
+            print(f"\n📋 MODE: INNOVATOR")
+            print(f"   🔍 Finding ideas for innovator: {caller_id}")
             
-            query = {
+            innovator_idea_ids = ideas_coll.distinct("_id", {
+                **normalize_any_id_field("innovatorId", caller_id),
+                "isDeleted": {"$ne": True}
+            })
+            
+            print(f"   ✅ Found {len(innovator_idea_ids)} ideas by this innovator")
+            print(f"   📝 Idea IDs (ObjectId): {innovator_idea_ids}")
+            
+            # ✅ Convert ObjectIds to strings for results_coll query
+            innovator_idea_ids_str = [str(id) for id in innovator_idea_ids]
+            print(f"   📝 Idea IDs (String): {innovator_idea_ids_str}")
+            
+            # Query results_coll for these ideas with score >= 85
+            results_query = {
+                "ideaId": {"$in": innovator_idea_ids_str},  # ✅ Use STRING IDs
+                "overallScore": {"$gte": 85}
+            }
+            
+        elif caller_role == 'ttc_coordinator':
+            print(f"\n📋 MODE: TTC COORDINATOR")
+            
+            # Get all innovators under this TTC
+            innovator_query = {
+                **normalize_any_id_field("ttcCoordinatorId", caller_id),
+                "role": {"$in": ["innovator", "individual_innovator"]},
+                "isDeleted": {"$ne": True}
+            }
+            print(f"   🔍 Looking for innovators with query: {innovator_query}")
+            
+            innovator_ids = users_coll.distinct("_id", innovator_query)
+            print(f"   ✅ Found {len(innovator_ids)} innovators")
+            print(f"   📝 Innovator IDs: {innovator_ids}")
+            
+            # Get idea IDs for these innovators
+            ttc_idea_ids = ideas_coll.distinct("_id", {
                 "innovatorId": {"$in": innovator_ids},
-                "isDeleted": {"$ne": True},
-                "overallScore": {"$gte": 85},
-                "consultationMentorId": {"$exists": False}
+                "isDeleted": {"$ne": True}
+            })
+            
+            print(f"   ✅ Found {len(ttc_idea_ids)} ideas by these innovators")
+            print(f"   📝 Idea IDs (ObjectId): {ttc_idea_ids}")
+            
+            # ✅ Convert ObjectIds to strings for results_coll query
+            ttc_idea_ids_str = [str(id) for id in ttc_idea_ids]
+            print(f"   📝 Idea IDs (String): {ttc_idea_ids_str}")
+            
+            # Query results_coll for these ideas with score >= 85
+            results_query = {
+                "ideaId": {"$in": ttc_idea_ids_str},  # ✅ Use STRING IDs
+                "overallScore": {"$gte": 85}
             }
         else:
             return jsonify({"error": "Access denied"}), 403
         
-        print(f"✅ Query: {query}")
+        print(f"\n🔍 STEP 2: Querying results_coll")
+        print(f"   Query: {results_query}")
         
-        # Get ideas
-        cursor = ideas_coll.find(query).sort("overallScore", -1)
+        # ✅ STEP 2: Get results from results_coll
+        results_cursor = results_coll.find(results_query).sort("overallScore", -1)
+        results_list = list(results_cursor)
         
-        ideas_list = []
-        for idea in cursor:
-            # Check if there's a pending request
-            # ✅ FIXED: Use ideas_coll to check for pending consultation requests
-            # Check if consultation request fields exist in the idea document
-            has_pending_request = False
+        print(f"✅ Found {len(results_list)} results with score >= 85")
+        
+        if len(results_list) > 0:
+            print(f"\n   📊 Results breakdown:")
+            for idx, result in enumerate(results_list, 1):
+                print(f"      {idx}. ideaId: {result.get('ideaId')} | Score: {result.get('overallScore')}")
+        else:
+            print(f"\n⚠️ No results found with score >= 85")
             
-            # Check if there's a consultationRequestStatus field set to "pending"
-            # (if your schema stores pending requests in the idea itself)
-            if idea.get('consultationRequestStatus') == 'pending':
-                has_pending_request = True
+            # Debug: Check if there are ANY results for these ideas
+            print(f"\n   🔍 Checking if results exist at all for these ideas...")
+            all_results_query = {
+                "ideaId": {"$in": results_query["ideaId"]["$in"]}
+            }
+            print(f"      Query (without score filter): {all_results_query}")
+            
+            all_results = list(results_coll.find(all_results_query))
+            print(f"      Found {len(all_results)} total results (any score)")
+            
+            if len(all_results) > 0:
+                print(f"\n      📊 All results (regardless of score):")
+                for idx, result in enumerate(all_results, 1):
+                    print(f"         {idx}. ideaId: {result.get('ideaId')} | Score: {result.get('overallScore')}")
+            else:
+                print(f"      ❌ No results found in results_coll for these idea IDs")
+                
+                # Check sample results
+                print(f"\n      🔍 Checking sample results in results_coll...")
+                sample_results = list(results_coll.find({}).limit(5))
+                if len(sample_results) > 0:
+                    print(f"         Sample results (first 5):")
+                    for idx, result in enumerate(sample_results, 1):
+                        print(f"            {idx}. ideaId: {result.get('ideaId')} (type: {type(result.get('ideaId'))}) | Score: {result.get('overallScore')}")
+            
+            return jsonify({
+                "success": True,
+                "data": [],
+                "count": 0
+            }), 200
+        
+        # ✅ STEP 3: Extract ideaIds from results (they are strings in results_coll)
+        eligible_idea_ids_str = [result.get('ideaId') for result in results_list]
+        print(f"\n📝 STEP 3: Extracting eligible idea IDs")
+        print(f"   Eligible idea IDs (strings): {eligible_idea_ids_str}")
+        
+        # ✅ Convert string IDs to ObjectIds for ideas_coll query
+        print(f"\n   🔄 Converting string IDs to ObjectIds...")
+        eligible_idea_ids_obj = []
+        for id_str in eligible_idea_ids_str:
+            if ObjectId.is_valid(id_str):
+                obj_id = ObjectId(id_str)
+                eligible_idea_ids_obj.append(obj_id)
+                print(f"      ✅ '{id_str}' → {obj_id}")
+            else:
+                print(f"      ❌ Invalid ObjectId: '{id_str}'")
+        
+        print(f"\n   📝 Eligible idea IDs (ObjectIds): {eligible_idea_ids_obj}")
+        
+        # Create a map of ideaId -> overallScore for quick lookup
+        score_map = {
+            result.get('ideaId'): result.get('overallScore') 
+            for result in results_list
+        }
+        print(f"\n   📊 Score map: {score_map}")
+        
+        # ✅ STEP 4: Fetch ideas from ideas_coll using ObjectIds
+        ideas_query = {
+            "_id": {"$in": eligible_idea_ids_obj},  # ✅ Use ObjectId for ideas_coll
+            "isDeleted": {"$ne": True},
+            # ✅ FIXED: Match ideas where consultationMentorId is not assigned
+            # This handles: field doesn't exist, field is None, or field is empty string
+            "$or": [
+                {"consultationMentorId": {"$exists": False}},
+                {"consultationMentorId": None},
+                {"consultationMentorId": ""}
+            ]
+        }
+
+        print(f"\n🔍 STEP 4: Fetching ideas from ideas_coll")
+        print(f"   Query: {ideas_query}")
+        print(f"   Looking for ideas WITHOUT consultation assigned (None, missing, or empty)")
+
+        ideas_cursor = ideas_coll.find(ideas_query)
+        ideas_from_db = list(ideas_cursor)
+
+        print(f"✅ Found {len(ideas_from_db)} ideas from ideas_coll (without consultations)")
+
+        
+        if len(ideas_from_db) < len(eligible_idea_ids_obj):
+            print(f"\n   ⚠️ Missing ideas! Expected {len(eligible_idea_ids_obj)}, got {len(ideas_from_db)}")
+            
+            # Find which ideas are missing
+            found_ids = [str(idea['_id']) for idea in ideas_from_db]
+            missing_ids = [id_str for id_str in eligible_idea_ids_str if id_str not in found_ids]
+            
+            if missing_ids:
+                print(f"   ❌ Missing idea IDs: {missing_ids}")
+                
+                # Check why they're missing
+                for missing_id in missing_ids:
+                    missing_idea = ideas_coll.find_one({"_id": ObjectId(missing_id)})
+                    if missing_idea:
+                        print(f"\n      🔍 Idea {missing_id} exists but was filtered out:")
+                        print(f"         isDeleted: {missing_idea.get('isDeleted')}")
+                        print(f"         consultationMentorId: {missing_idea.get('consultationMentorId')}")
+                    else:
+                        print(f"      ❌ Idea {missing_id} doesn't exist in ideas_coll")
+        
+        # ✅ STEP 5: Format response
+        print(f"\n📦 STEP 5: Formatting response")
+        ideas_list = []
+        
+        for idx, idea in enumerate(ideas_from_db, 1):
+            idea_id_str = str(idea['_id'])
+            
+            print(f"\n   {idx}. Processing idea: {idea_id_str}")
+            print(f"      Title: {idea.get('title', 'Untitled')}")
+            
+            # Check if there's a pending consultation request
+            has_pending_request = bool(idea.get('consultationRequestStatus') == 'pending')
+            print(f"      Has pending request: {has_pending_request}")
             
             # Get innovator details
             innovator = find_user(idea.get('innovatorId'))
+            if innovator:
+                print(f"      Innovator: {innovator.get('name')} ({innovator.get('email')})")
+            else:
+                print(f"      ⚠️ Innovator not found for ID: {idea.get('innovatorId')}")
+            
+            # Get overallScore from results_coll (use string ID for lookup)
+            overall_score = score_map.get(idea_id_str, idea.get('overallScore', 0))
+            print(f"      Overall Score: {overall_score} (from {'results_coll' if idea_id_str in score_map else 'ideas_coll'})")
             
             ideas_list.append({
-                "id": str(idea['_id']),
+                "id": idea_id_str,
                 "title": idea.get('title', 'Untitled Idea'),
                 "innovatorId": str(idea.get('innovatorId')),
                 "innovatorName": innovator.get('name', 'Unknown') if innovator else 'Unknown',
                 "innovatorEmail": innovator.get('email', '') if innovator else '',
-                "overallScore": idea.get('overallScore'),
+                "overallScore": overall_score,
                 "domain": idea.get('domain', ''),
                 "createdAt": idea['createdAt'].isoformat() if idea.get('createdAt') else None,
                 "hasPendingRequest": has_pending_request
             })
         
-        print(f"✅ Found {len(ideas_list)} eligible ideas")
+        # Sort by score (highest first)
+        ideas_list.sort(key=lambda x: x['overallScore'], reverse=True)
+        
+        print(f"\n✅ FINAL RESULT: Returning {len(ideas_list)} eligible ideas for consultation")
+        
+        if len(ideas_list) > 0:
+            print(f"\n   📊 Ideas summary:")
+            for idx, idea in enumerate(ideas_list, 1):
+                print(f"      {idx}. {idea['title']} (Score: {idea['overallScore']})")
+        
+        print("=" * 80 + "\n")
         
         return jsonify({
             "success": True,

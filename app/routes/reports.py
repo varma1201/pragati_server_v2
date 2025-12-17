@@ -256,65 +256,100 @@ def download_idea_report_pdf(idea_id):
 def build_role_based_query(caller_id, caller_role, data_source="ideas"):
     """
     Build MongoDB query based on user role for Reports Hub.
-    """
-    base_query = {"isDeleted": {"$ne": True}}
     
+    Data model reality:
+    - ideas.collegeId = null (NOT SET!)
+    - ideas.ttcCoordinatorId = STRING (TTC who manages the innovator)
+    - ideas.innovatorId = ObjectId
+    """
+    print("\n" + "=" * 80)
+    print(f"🔧 build_role_based_query()")
+    print("=" * 80)
+    print(f"  caller_id: {caller_id} (type: {type(caller_id)})")
+    print(f"  caller_role: {caller_role}")
+    print(f"  data_source: {data_source}")
+    
+    base_query = {"isDeleted": {"$ne": True}}
+    caller_id_str = str(caller_id)
+    
+    # ✅ INNOVATOR: See only their own ideas (innovatorId is ObjectId)
     if caller_role == "innovator" or caller_role == "individual_innovator":
         base_query.update(normalize_any_id_field("innovatorId", caller_id))
+        print(f"  ✅ INNOVATOR: Filter by innovatorId = {caller_id}")
     
+    # ✅ TTC COORDINATOR: See all ideas with ttcCoordinatorId = caller_id (STRING)
     elif caller_role == "ttc_coordinator":
-        innovator_ids = users_coll.distinct("_id", {
-            **normalize_any_id_field("ttcCoordinatorId", caller_id),
-            "role": {"$in": ["innovator", "individual_innovator"]},
+        base_query["ttcCoordinatorId"] = caller_id_str
+        print(f"  ✅ TTC: Filter by ttcCoordinatorId = '{caller_id_str}'")
+    
+    # ✅ COLLEGE ADMIN: Need to find TTCs first, then get their ideas
+    elif caller_role == "college_admin":
+        print(f"  🔧 COLLEGE ADMIN: Finding TTCs for college {caller_id_str}")
+        
+        # Step 1: Find all TTCs in this college
+        ttc_ids = users_coll.distinct("_id", {
+            "collegeId": caller_id_str,  # TTCs have collegeId
+            "role": "ttc_coordinator",
             "isDeleted": {"$ne": True}
         })
-        base_query["innovatorId"] = {"$in": innovator_ids}
-    
-    elif caller_role == "college_admin":
-        caller_user = find_user(caller_id)
-        if caller_user and caller_user.get("collegeId"):
-            college_id = caller_user["collegeId"]
-            innovator_ids = users_coll.distinct("_id", {
-                **normalize_any_id_field("collegeId", college_id),
-                "role": {"$in": ["innovator", "individual_innovator"]},
-                "isDeleted": {"$ne": True}
-            })
-            base_query["innovatorId"] = {"$in": innovator_ids}
+        
+        print(f"     ├─ Found {len(ttc_ids)} TTCs")
+        
+        if ttc_ids:
+            # Step 2: Get ideas from these TTCs
+            ttc_ids_str = [str(tid) for tid in ttc_ids]
+            base_query["ttcCoordinatorId"] = {"$in": ttc_ids_str}
+            print(f"     └─ Filter by ttcCoordinatorId in {ttc_ids_str}")
         else:
-            base_query["innovatorId"] = {"$in": []}
+            # No TTCs found = no ideas
+            print(f"     └─ ⚠️ No TTCs found - returning empty result set")
+            base_query["_id"] = {"$in": []}
     
-    # ✅ NEW: Add mentor support (external mentor)
+    # ✅ EXTERNAL MENTOR: See ideas where they are consultation mentor
     elif caller_role == "mentor":
-        # Mentors see ideas where they are assigned as consultationMentorId
         base_query.update(normalize_any_id_field("consultationMentorId", caller_id))
+        print(f"  ✅ MENTOR: Filter by consultationMentorId = {caller_id}")
     
-    # ✅ NEW: Add internal_mentor support
+    # ✅ INTERNAL MENTOR: See ideas where they are assigned mentor
     elif caller_role == "internal_mentor":
-        # Internal mentors see ideas where they are assigned as mentorId
         base_query.update(normalize_any_id_field("mentorId", caller_id))
+        print(f"  ✅ INTERNAL MENTOR: Filter by mentorId = {caller_id}")
     
+    # ✅ SUPER ADMIN: See everything
     elif caller_role == "super_admin":
-        pass  # See everything
+        print(f"  ✅ SUPER ADMIN: No filters (all data)")
+        pass
     
     else:
-        raise ValueError(f"Unknown role: {caller_role}")
+        print(f"  ❌ UNKNOWN ROLE: {caller_role} - returning empty result set")
+        base_query["_id"] = {"$in": []}
     
-    # Data source filters
+    # ========================================
+    # APPLY DATA SOURCE SPECIFIC FILTERS
+    # ========================================
+    print(f"\n  📊 Data source: {data_source}")
+    
     if data_source == "consultations":
-        # ✅ UPDATED: Different field for external vs internal mentors
+        print(f"  🔧 Adding consultation filters...")
         if caller_role == "mentor":
-            # Already filtered by consultationMentorId above
+            print(f"    ✓ Mentor: Already filtered by consultationMentorId")
             pass
         elif caller_role == "internal_mentor":
             base_query["mentorId"] = {"$exists": True, "$ne": None}
+            print(f"    ✓ Internal Mentor: Added mentorId existence check")
         else:
             base_query["consultationMentorId"] = {"$exists": True, "$ne": None}
+            print(f"    ✓ Other roles: Added consultationMentorId existence check")
     
     elif data_source == "validated_ideas":
+        print(f"  🔧 Adding validated ideas filter...")
         base_query["overallScore"] = {"$exists": True, "$ne": None}
+        print(f"    ✓ Added overallScore existence check")
+    
+    print(f"\n  📋 Final query: {base_query}")
+    print("=" * 80)
     
     return base_query
-
 
 @reports_bp.route("/hub/list", methods=["GET"])
 @requires_auth()
@@ -369,43 +404,77 @@ def export_ideas_summary():
     CSV export of all ideas (Reports Hub - bulk export).
     DIFFERENT from individual idea reports.
     """
+    print("=" * 80)
+    print("📊 IDEAS SUMMARY EXPORT STARTED")
+    print("=" * 80)
+    
     try:
         caller_id = request.user_id
         caller_role = request.user_role
         
+        print(f"👤 Caller ID: {caller_id} (type: {type(caller_id)})")
+        print(f"👤 Caller Role: {caller_role}")
+        
         logger.info(f"📊 Ideas summary requested by {caller_role}: {caller_id}")
         
         # Build role-based query
+        print("\n🔧 Building role-based query...")
         query = build_role_based_query(caller_id, caller_role, "ideas")
         
         # Optional filters
-        if request.args.get("domain"):
-            query["domain"] = request.args.get("domain")
-        if request.args.get("stage"):
-            query["stage"] = request.args.get("stage")
+        domain_filter = request.args.get("domain")
+        stage_filter = request.args.get("stage")
+        
+        print(f"🎯 Domain filter: {domain_filter}")
+        print(f"🎯 Stage filter: {stage_filter}")
+        
+        if domain_filter:
+            query["domain"] = domain_filter
+        
+        if stage_filter:
+            query["stage"] = stage_filter
+        
+        # ✅ ADD: Debug logging
+        print(f"\n🔍 Final Query: {query}")
+        logger.info(f"🔍 Query: {query}")
         
         # Fetch ideas
+        print("\n🔎 Fetching ideas from database...")
         ideas = list(ideas_coll.find(query).sort("submittedAt", -1))
+        
+        print(f"✅ Found {len(ideas)} ideas for export")
         logger.info(f"✅ Found {len(ideas)} ideas for export")
         
         if len(ideas) == 0:
+            print("⚠️ No ideas found - returning 404")
+            print("=" * 80)
             return jsonify({
                 "error": "No data available",
-                "message": "No ideas found for your role."
+                "message": f"No ideas found for {caller_role}. Query: {query}"
             }), 404
         
+        # Show sample of ideas found
+        print(f"\n📋 Sample of ideas found:")
+        for i, idea in enumerate(ideas[:3], 1):
+            print(f"  {i}. {idea.get('title', 'Untitled')} (ID: {idea.get('_id')})")
+            print(f"     - Innovator: {idea.get('innovatorId')}")
+            print(f"     - TTC: {idea.get('ttcCoordinatorId')}")
+            print(f"     - College: {idea.get('collegeId')}")
+        
         # Generate CSV
+        print("\n📝 Generating CSV...")
         output = io.StringIO()
         writer = csv.writer(output)
         
         # Header row
         writer.writerow([
             "Idea ID", "Title", "Innovator Name", "Innovator Email",
-            "Domain", "Subdomain", "TRL", "Overall Score", "Stage", 
-            "Submitted Date", "Mentor", "College ID"
+            "Domain", "Subdomain", "TRL", "Overall Score", "Stage",
+            "Submitted Date", "Mentor", "TTC ID", "College ID"
         ])
         
         # Data rows
+        rows_written = 0
         for idea in ideas:
             innovator = find_user(idea.get("innovatorId"))
             mentor = find_user(idea.get("mentorId")) if idea.get("mentorId") else None
@@ -422,10 +491,15 @@ def export_ideas_summary():
                 idea.get("stage", ""),
                 idea.get("submittedAt").strftime("%Y-%m-%d %H:%M") if idea.get("submittedAt") else "",
                 mentor.get("name", "") if mentor else "",
-                idea.get("collegeId", "")
+                str(idea.get("ttcCoordinatorId", "")),
+                str(idea.get("collegeId", ""))
             ])
+            rows_written += 1
+        
+        print(f"✅ Wrote {rows_written} rows to CSV")
         
         # Save record in generated_reports collection
+        print("\n💾 Saving report record to database...")
         report_doc = {
             "userId": caller_id,
             "name": f"Ideas Summary - {datetime.now().strftime('%Y-%m-%d')}",
@@ -435,9 +509,11 @@ def export_ideas_summary():
             "createdAt": datetime.now(timezone.utc),
             "isDeleted": False
         }
-        generated_reports_coll.insert_one(report_doc)
+        result = generated_reports_coll.insert_one(report_doc)
+        print(f"✅ Report record saved with ID: {result.inserted_id}")
         
         # Convert to bytes
+        print("\n📦 Converting to downloadable file...")
         output.seek(0)
         bytes_output = io.BytesIO()
         bytes_output.write(output.getvalue().encode('utf-8-sig'))
@@ -445,7 +521,13 @@ def export_ideas_summary():
         
         filename = f"ideas_summary_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
         
+        print(f"✅ Generated CSV: {filename}")
+        print(f"📁 File size: {len(bytes_output.getvalue())} bytes")
         logger.info(f"✅ Generated CSV: {filename}")
+        
+        print("=" * 80)
+        print("✅ IDEAS SUMMARY EXPORT COMPLETED SUCCESSFULLY")
+        print("=" * 80)
         
         return send_file(
             bytes_output,
@@ -455,6 +537,10 @@ def export_ideas_summary():
         )
         
     except Exception as e:
+        print("=" * 80)
+        print(f"❌ ERROR in export_ideas_summary: {type(e).__name__}")
+        print(f"❌ Message: {str(e)}")
+        print("=" * 80)
         logger.error(f"❌ Failed to generate ideas summary: {e}")
         import traceback
         traceback.print_exc()
@@ -467,24 +553,48 @@ def export_consultations():
     """
     CSV export of consultation history (Reports Hub).
     """
+    print("=" * 80)
+    print("📊 CONSULTATIONS EXPORT STARTED")
+    print("=" * 80)
+    
     try:
         caller_id = request.user_id
         caller_role = request.user_role
         
+        print(f"👤 Caller ID: {caller_id} (type: {type(caller_id)})")
+        print(f"👤 Caller Role: {caller_role}")
+        
         logger.info(f"📊 Consultation export requested by {caller_role}: {caller_id}")
         
+        print("\n🔧 Building role-based query for consultations...")
         query = build_role_based_query(caller_id, caller_role, "consultations")
         
+        print(f"🔍 Final Query: {query}")
+        
+        print("\n🔎 Fetching consultations from database...")
         consultations = list(ideas_coll.find(query).sort("consultationScheduledAt", -1))
+        
+        print(f"✅ Found {len(consultations)} consultations")
         logger.info(f"✅ Found {len(consultations)} consultations")
         
         if len(consultations) == 0:
+            print("⚠️ No consultations found - returning 404")
+            print("=" * 80)
             return jsonify({
                 "error": "No consultations found",
-                "message": "No consultation data available for your role."
+                "message": f"No consultation data available for {caller_role}. Query: {query}"
             }), 404
         
+        # Show sample of consultations found
+        print(f"\n📋 Sample of consultations found:")
+        for i, idea in enumerate(consultations[:3], 1):
+            print(f"  {i}. {idea.get('title', 'Untitled')} (ID: {idea.get('_id')})")
+            print(f"     - Mentor: {idea.get('consultationMentorId')}")
+            print(f"     - Status: {idea.get('consultationStatus', 'N/A')}")
+            print(f"     - Scheduled: {idea.get('consultationScheduledAt')}")
+        
         # Generate CSV
+        print("\n📝 Generating CSV...")
         output = io.StringIO()
         writer = csv.writer(output)
         
@@ -494,6 +604,7 @@ def export_consultations():
             "Scheduled Date", "Consultation Notes"
         ])
         
+        rows_written = 0
         for idea in consultations:
             innovator = find_user(idea.get("innovatorId"))
             mentor = find_user(idea.get("consultationMentorId"))
@@ -509,8 +620,12 @@ def export_consultations():
                 idea.get("consultationScheduledAt").strftime("%Y-%m-%d %H:%M") if idea.get("consultationScheduledAt") else "Not scheduled",
                 idea.get("consultationNotes", "")
             ])
+            rows_written += 1
+        
+        print(f"✅ Wrote {rows_written} rows to CSV")
         
         # Save record
+        print("\n💾 Saving report record to database...")
         report_doc = {
             "userId": caller_id,
             "name": f"Consultations - {datetime.now().strftime('%Y-%m-%d')}",
@@ -520,14 +635,23 @@ def export_consultations():
             "createdAt": datetime.now(timezone.utc),
             "isDeleted": False
         }
-        generated_reports_coll.insert_one(report_doc)
+        result = generated_reports_coll.insert_one(report_doc)
+        print(f"✅ Report record saved with ID: {result.inserted_id}")
         
+        print("\n📦 Converting to downloadable file...")
         output.seek(0)
         bytes_output = io.BytesIO()
         bytes_output.write(output.getvalue().encode('utf-8-sig'))
         bytes_output.seek(0)
         
         filename = f"consultations_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        print(f"✅ Generated CSV: {filename}")
+        print(f"📁 File size: {len(bytes_output.getvalue())} bytes")
+        
+        print("=" * 80)
+        print("✅ CONSULTATIONS EXPORT COMPLETED SUCCESSFULLY")
+        print("=" * 80)
         
         return send_file(
             bytes_output,
@@ -537,7 +661,13 @@ def export_consultations():
         )
         
     except Exception as e:
+        print("=" * 80)
+        print(f"❌ ERROR in export_consultations: {type(e).__name__}")
+        print(f"❌ Message: {str(e)}")
+        print("=" * 80)
         logger.error(f"❌ Failed to generate consultations report: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -547,10 +677,18 @@ def generate_custom_report():
     """
     Generate custom report (Reports Hub).
     """
+    print("=" * 80)
+    print("📊 CUSTOM REPORT GENERATION STARTED")
+    print("=" * 80)
+    
     try:
         caller_id = request.user_id
         caller_role = request.user_role
         body = request.get_json()
+        
+        print(f"👤 Caller ID: {caller_id} (type: {type(caller_id)})")
+        print(f"👤 Caller Role: {caller_role}")
+        print(f"📦 Request Body: {body}")
         
         logger.info(f"📊 Custom report requested by {caller_role}: {caller_id}")
         
@@ -562,32 +700,67 @@ def generate_custom_report():
         columns = body.get("columns", [])
         schedule = body.get("schedule")
         
+        print(f"\n📋 Report Configuration:")
+        print(f"   Report Name: {report_name}")
+        print(f"   Format: {format_type}")
+        print(f"   Data Source: {data_source}")
+        print(f"   Date Range: {date_range}")
+        print(f"   Filters: {filters}")
+        print(f"   Columns: {columns}")
+        print(f"   Schedule: {schedule}")
+        
         # Build query
+        print(f"\n🔧 Building role-based query...")
         query = build_role_based_query(caller_id, caller_role, data_source)
+        print(f"🔍 Initial query: {query}")
         
         # Apply date range
         if date_range.get("from") or date_range.get("to"):
+            print(f"\n📅 Applying date range filter...")
             date_filter = {}
+            
             if date_range.get("from"):
                 try:
-                    date_filter["$gte"] = datetime.fromisoformat(date_range["from"].replace('Z', '+00:00'))
-                except:
+                    from_date = datetime.fromisoformat(date_range["from"].replace('Z', '+00:00'))
+                    date_filter["$gte"] = from_date
+                    print(f"   ✅ From date: {from_date}")
+                except Exception as e:
+                    print(f"   ⚠️ Failed to parse 'from' date: {e}")
                     pass
+            
             if date_range.get("to"):
                 try:
-                    date_filter["$lte"] = datetime.fromisoformat(date_range["to"].replace('Z', '+00:00'))
-                except:
+                    to_date = datetime.fromisoformat(date_range["to"].replace('Z', '+00:00'))
+                    date_filter["$lte"] = to_date
+                    print(f"   ✅ To date: {to_date}")
+                except Exception as e:
+                    print(f"   ⚠️ Failed to parse 'to' date: {e}")
                     pass
+            
             if date_filter:
                 query["submittedAt"] = date_filter
+                print(f"   ✅ Date filter applied: {date_filter}")
+        else:
+            print(f"\n📅 No date range filter provided")
         
         # Apply filters
-        for key, value in filters.items():
-            if value and value != "all":
-                query[key] = value
+        if filters:
+            print(f"\n🎯 Applying custom filters...")
+            for key, value in filters.items():
+                if value and value != "all":
+                    query[key] = value
+                    print(f"   ✅ {key} = {value}")
+                else:
+                    print(f"   ⏭️  Skipped {key} (value: {value})")
+        else:
+            print(f"\n🎯 No custom filters provided")
+        
+        print(f"\n🔍 Final Query: {query}")
         
         # Handle scheduling
         if schedule and schedule.get("type") == "scheduled":
+            print(f"\n⏰ Scheduling report for future execution...")
+            
             scheduled_doc = {
                 "userId": caller_id,
                 "reportName": report_name,
@@ -600,21 +773,37 @@ def generate_custom_report():
                 "createdAt": datetime.now(timezone.utc),
                 "nextRunAt": datetime.now(timezone.utc) + timedelta(days=1)  # TODO: Calculate properly
             }
-            scheduled_reports_coll.insert_one(scheduled_doc)
+            
+            result = scheduled_reports_coll.insert_one(scheduled_doc)
+            print(f"✅ Scheduled report saved with ID: {result.inserted_id}")
+            
+            report_id = f"REP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            print(f"✅ Report ID: {report_id}")
+            print("=" * 80)
             
             return jsonify({
                 "success": True,
                 "message": f"Report '{report_name}' scheduled successfully",
-                "reportId": f"REP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                "reportId": report_id
             }), 200
         
         # Generate immediately
+        print(f"\n⚡ Generating report immediately...")
+        print(f"   Format: {format_type}")
+        
         if format_type == "csv":
+            print(f"   ✅ Calling _generate_csv_custom()...")
             return _generate_csv_custom(query, columns, report_name, data_source, caller_id)
         else:
-            return jsonify({"error": "Invalid format. Use 'csv'"}), 400
+            print(f"   ❌ Invalid format: {format_type}")
+            print("=" * 80)
+            return jsonify({"error": f"Invalid format '{format_type}'. Use 'csv'"}), 400
         
     except Exception as e:
+        print("=" * 80)
+        print(f"❌ ERROR in generate_custom_report: {type(e).__name__}")
+        print(f"❌ Message: {str(e)}")
+        print("=" * 80)
         logger.error(f"❌ Custom report generation failed: {e}")
         import traceback
         traceback.print_exc()
@@ -623,40 +812,87 @@ def generate_custom_report():
 
 def _generate_csv_custom(query, columns, report_name, data_source, user_id):
     """Helper to generate CSV from custom query"""
+    print("\n" + "=" * 80)
+    print("📝 _generate_csv_custom() STARTED")
+    print("=" * 80)
+    
     try:
+        print(f"📊 Parameters:")
+        print(f"   Query: {query}")
+        print(f"   Columns: {columns}")
+        print(f"   Report Name: {report_name}")
+        print(f"   Data Source: {data_source}")
+        print(f"   User ID: {user_id}")
+        
+        # Fetch data
+        print(f"\n🔎 Fetching data from {data_source} collection...")
         data = list(ideas_coll.find(query).sort("createdAt", -1))
         
+        print(f"✅ Found {len(data)} records")
+        
         if not data:
+            print(f"⚠️ No data found - returning 404")
+            print("=" * 80)
             return jsonify({
                 "error": "No data found",
-                "message": "No records match your filter criteria."
+                "message": "No records match your filter criteria.",
+                "query": query
             }), 404
+        
+        # Show sample of data found
+        print(f"\n📋 Sample of data found:")
+        for i, item in enumerate(data[:3], 1):
+            print(f"  {i}. {item.get('title', 'Untitled')} (ID: {item.get('_id')})")
+            print(f"     - Domain: {item.get('domain')}")
+            print(f"     - Score: {item.get('overallScore', 'N/A')}")
         
         logger.info(f"✅ Found {len(data)} records for custom report")
         
         # Column mapping
+        print(f"\n🗂️  Setting up column mapping...")
         column_map = {
             "ID": lambda x: str(x.get("_id")),
             "Title": lambda x: x.get("title", ""),
             "Innovator Name": lambda x: find_user(x.get("innovatorId")).get("name", "") if find_user(x.get("innovatorId")) else "",
+            "Innovator Email": lambda x: find_user(x.get("innovatorId")).get("email", "") if find_user(x.get("innovatorId")) else "",
             "Domain": lambda x: x.get("domain", ""),
+            "Subdomain": lambda x: x.get("subDomain", ""),
             "Score": lambda x: x.get("overallScore", "N/A"),
             "Stage": lambda x: x.get("stage", ""),
-            "Date": lambda x: x.get("submittedAt").strftime("%Y-%m-%d") if x.get("submittedAt") else ""
+            "Status": lambda x: x.get("status", ""),
+            "TRL": lambda x: x.get("trl", ""),
+            "Date": lambda x: x.get("submittedAt").strftime("%Y-%m-%d") if x.get("submittedAt") else "",
+            "TTC ID": lambda x: x.get("ttcCoordinatorId", ""),
+            "College ID": lambda x: x.get("collegeId", "")
         }
         
+        # If no columns specified, use all
         if not columns:
             columns = list(column_map.keys())
+            print(f"   ℹ️  No columns specified - using all: {columns}")
+        else:
+            print(f"   ✅ Using specified columns: {columns}")
         
+        # Generate CSV
+        print(f"\n📝 Generating CSV...")
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(columns)
         
+        # Header row
+        writer.writerow(columns)
+        print(f"   ✅ Header row written: {columns}")
+        
+        # Data rows
+        rows_written = 0
         for item in data:
             row = [column_map.get(col, lambda x: "")(item) for col in columns]
             writer.writerow(row)
+            rows_written += 1
+        
+        print(f"   ✅ Wrote {rows_written} data rows")
         
         # Save record
+        print(f"\n💾 Saving report record to database...")
         report_doc = {
             "userId": user_id,
             "name": report_name,
@@ -666,14 +902,23 @@ def _generate_csv_custom(query, columns, report_name, data_source, user_id):
             "createdAt": datetime.now(timezone.utc),
             "isDeleted": False
         }
-        generated_reports_coll.insert_one(report_doc)
+        result = generated_reports_coll.insert_one(report_doc)
+        print(f"✅ Report record saved with ID: {result.inserted_id}")
         
+        # Convert to bytes
+        print(f"\n📦 Converting to downloadable file...")
         output.seek(0)
         bytes_output = io.BytesIO()
         bytes_output.write(output.getvalue().encode('utf-8-sig'))
         bytes_output.seek(0)
         
         filename = f"{report_name.replace(' ', '_')}_{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
+        
+        print(f"✅ Generated CSV: {filename}")
+        print(f"📁 File size: {len(bytes_output.getvalue())} bytes")
+        print("=" * 80)
+        print("✅ CSV GENERATION COMPLETED SUCCESSFULLY")
+        print("=" * 80)
         
         return send_file(
             bytes_output,
@@ -683,7 +928,13 @@ def _generate_csv_custom(query, columns, report_name, data_source, user_id):
         )
         
     except Exception as e:
+        print("=" * 80)
+        print(f"❌ ERROR in _generate_csv_custom: {type(e).__name__}")
+        print(f"❌ Message: {str(e)}")
+        print("=" * 80)
         logger.error(f"❌ CSV generation failed: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 

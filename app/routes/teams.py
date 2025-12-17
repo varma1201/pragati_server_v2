@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from bson import ObjectId
 import secrets
 import string
+from app.services.audit_service import AuditService
+
 
 teams_bp = Blueprint('teams', __name__, url_prefix='/api/teams')
 
@@ -707,6 +709,16 @@ def invite_team_member():
     print(f"   ✅ Success: {len(results['success'])}")
     print(f"   ⚠️ Skipped: {len(results['skipped'])}")
     print(f"   ❌ Errors: {len(results['errors'])}")
+
+    AuditService.log_action(
+        actor_id=caller_id,
+        action=f"Invited {invitee_email} to team for idea: {idea.get('title')}",
+        category=AuditService.CATEGORY_IDEA,
+        target_id=idea_id,
+        target_type="team_invite",
+        metadata={"inviteeEmail": invitee_email}
+    )
+
     
     return jsonify({
         "success": True,
@@ -1473,6 +1485,14 @@ def respond_to_invitation():
         # STEP 6D: Render decline page
         print(f"\n✅ [SUCCESS] Rendering rejection page...")
         print(f"=" * 80)
+
+        AuditService.log_action(
+            actor_id=caller_id,
+            action=f"{'Accepted' if status == 'accepted' else 'Rejected'} team invitation for: {idea.get('title')}",
+            category=AuditService.CATEGORY_IDEA,
+            target_id=invitation_id,
+            target_type="team_invite"
+        )
         
         return render_template('invitation_declined.html',
             project_title=draft_title,

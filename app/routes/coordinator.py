@@ -1,11 +1,13 @@
 from flask import Blueprint, request, jsonify, current_app
 from app.middleware.auth import requires_role
-from app.database.mongo import users_coll
+from app.database.mongo import users_coll, ideas_coll, consultation_requests_coll, credit_requests_coll, audit_logs_coll, credit_history_coll
 from app.services.auth_service import AuthService
 from app.services.email_service import EmailService
 from app.utils.validators import clean_doc
 from datetime import datetime, timezone
 from bson import ObjectId
+from app.services.audit_service import AuditService
+
 
 coordinator_bp = Blueprint('coordinator', __name__, url_prefix='/api/coordinator')
 
@@ -28,6 +30,26 @@ def create_innovator():
     if users_coll.find_one({"email": email}):
         return jsonify({"error": "Email already exists"}), 409
     
+    # ✅ FIX: Get TTC's collegeId
+    if isinstance(caller_id, str):
+        caller_id = ObjectId(caller_id)
+    
+    ttc_user = users_coll.find_one({"_id": caller_id})
+    if not ttc_user:
+        return jsonify({"error": "TTC Coordinator not found"}), 404
+    
+    caller_college_id = ttc_user.get('collegeId')
+    
+    if not caller_college_id:
+        print(f"⚠️ WARNING: TTC {caller_id} has no collegeId!")
+        # You might want to return an error here or set to None
+        # return jsonify({"error": "TTC has no associated college"}), 400
+    
+    print(f"🏢 Creating innovator:")
+    print(f"   TTC: {ttc_user.get('name')} ({caller_id})")
+    print(f"   College ID: {caller_college_id}")
+    print(f"   New innovator: {name} ({email})")
+    
     auth_service = AuthService(current_app.config['JWT_SECRET'])
     temp_password = auth_service.generate_temp_password()
     
@@ -42,7 +64,8 @@ def create_innovator():
         "password": auth_service.hash_password(temp_password),
         "role": "innovator",
         "createdBy": caller_id,
-        "ttcCoordinatorId": caller_id,
+        "collegeId": caller_college_id,  # ✅ Now properly set
+        "ttcCoordinatorId": str(caller_id),  # ✅ Store as STRING
         "creditQuota": 0,
         "isPsychometricAnalysisDone": False,
         "isActive": True,
@@ -51,6 +74,22 @@ def create_innovator():
     }
     
     users_coll.insert_one(user_doc)
+    
+    print(f"✅ Innovator created: {uid}")
+    print(f"   - collegeId: {caller_college_id}")
+    print(f"   - ttcCoordinatorId: {str(caller_id)}")
+
+    # ✅ ADD AUDIT LOG
+    try:
+        from app.services.audit_service import AuditService
+        AuditService.log_user_created(
+            actor_id=caller_id,
+            new_user_id=uid,
+            new_user_name=name,
+            role="innovator"
+        )
+    except Exception as e:
+        print(f"⚠️ Audit log failed: {e}")
     
     # Send email
     try:
@@ -62,8 +101,9 @@ def create_innovator():
             "innovator", name, email, temp_password
         )
         email_service.send_email(email, subject, html_body)
+        print(f"✅ Welcome email sent to {email}")
     except Exception as e:
-        print(f"Email failed: {e}")
+        print(f"⚠️ Email failed: {e}")
     
     # ✅ Remove password before returning
     user_response = {k: v for k, v in user_doc.items() if k != 'password'}
@@ -75,7 +115,6 @@ def create_innovator():
         "user": clean_doc(user_response),
         "tempPassword": temp_password
     }), 201
-
 
 @coordinator_bp.route('/innovators', methods=['GET'])
 @requires_role(['ttc_coordinator'])
@@ -173,6 +212,14 @@ def create_internal_mentor():
     
     # Insert user
     users_coll.insert_one(user_doc)
+
+    from app.services.audit_service import AuditService
+    AuditService.log_user_created(
+        actor_id=caller_id,
+        new_user_id=uid,
+        new_user_name=name,
+        role="internal_mentor"
+    )
     
     # Send welcome email
     try:
@@ -414,6 +461,13 @@ def delete_internal_mentor(mentor_id):
                 "deletedBy": caller_id
             }
         }
+    )
+
+    from app.services.audit_service import AuditService
+    AuditService.log_user_deleted(
+        actor_id=caller_id,
+        deleted_user_id=mentor_id,
+        deleted_user_name=mentor.get("name", "Unknown")
     )
     
     return jsonify({
@@ -734,3 +788,509 @@ def get_credit_assignment_history():
             "pages": (total + limit - 1) // limit
         }
     }), 200
+
+
+@coordinator_bp.route('/stats/dashboard', methods=['GET'])
+@requires_role(['ttc_coordinator'])
+def get_dashboard_stats():
+    """
+    Get comprehensive dashboard statistics for TTC Coordinator.
+    """
+    print("=" * 80)
+    print("📊 COORDINATOR DASHBOARD STATS REQUESTED")
+    print("=" * 80)
+    
+    try:
+        caller_id = request.user_id
+        
+        # Convert to ObjectId
+        if isinstance(caller_id, str):
+            caller_id = ObjectId(caller_id)
+        
+        caller_id_str = str(caller_id)  # ✅ FIX: Convert to STRING for queries
+        
+        print(f"👤 TTC Coordinator ID: {caller_id_str}")
+        
+        current_app.logger.info(f"📊 Fetching dashboard stats for coordinator: {caller_id_str}")
+        
+        # 1. Get all innovators under this coordinator
+        innovators = list(users_coll.find({
+            "role": {"$in": ["innovator", "individual_innovator"]},  # ✅ Support both types
+            "ttcCoordinatorId": caller_id_str,  # ✅ FIX: Use STRING
+            "isDeleted": {"$ne": True}
+        }))
+        
+        innovator_ids = [inv["_id"] for inv in innovators]  # Keep as ObjectId for ideas query
+        innovator_ids_str = [str(inv["_id"]) for inv in innovators]
+        
+        total_innovators = len(innovators)
+        
+        print(f"👨‍🎓 Found {total_innovators} innovators")
+        print(f"📋 Innovator IDs: {innovator_ids_str}")
+        
+        # 2. Get all ideas submitted by these innovators
+        ideas_query = {
+            "isDeleted": {"$ne": True}
+        }
+        
+        if innovator_ids:
+            ideas_query["innovatorId"] = {"$in": innovator_ids}  # ✅ Use ObjectId array
+        else:
+            # No innovators = no ideas
+            return jsonify({
+                "success": True,
+                "data": {
+                    "totalInnovators": 0,
+                    "totalAssignedIdeas": 0,
+                    "pendingEvaluations": 0,
+                    "internalMentors": 0,
+                    "upcomingConsultations": 0,
+                    "statusDistribution": {
+                        "approved": 0,
+                        "improvise": 0,
+                        "rejected": 0,
+                        "pending": 0
+                    },
+                    "topInnovators": [],
+                    "consultations": []
+                }
+            }), 200
+        
+        all_ideas = list(ideas_coll.find(ideas_query))
+        total_assigned_ideas = len(all_ideas)
+        
+        print(f"💡 Found {total_assigned_ideas} ideas")
+        
+        # 3. Pending evaluations (ideas without score or score < 85)
+        pending_evaluations = len([
+            i for i in all_ideas
+            if i.get('overallScore') is None or i.get('overallScore', 0) < 85
+        ])
+        
+        print(f"⏳ Pending evaluations: {pending_evaluations}")
+        
+        # =========================================================================
+        # 4. INTERNAL MENTORS COUNT
+        # =========================================================================
+        print("\n🔍 DEBUG: Fetching Internal Mentors")
+        
+        ttc_user = users_coll.find_one({"_id": caller_id})
+        print(f"   TTC User found: {ttc_user is not None}")
+        if ttc_user:
+            print(f"   TTC Name: {ttc_user.get('name')}")
+            print(f"   TTC collegeId: {ttc_user.get('collegeId')} (type: {type(ttc_user.get('collegeId'))})")
+        
+        college_id = ttc_user.get('collegeId') if ttc_user else None
+        
+        # Convert collegeId to ObjectId if it's a string
+        college_id_obj = None
+        if college_id:
+            if isinstance(college_id, str):
+                try:
+                    college_id_obj = ObjectId(college_id)
+                    print(f"   ✅ Converted collegeId to ObjectId: {college_id_obj}")
+                except Exception as e:
+                    print(f"   ❌ Could not convert collegeId: {e}")
+            else:
+                college_id_obj = college_id
+                print(f"   collegeId already ObjectId: {college_id_obj}")
+        
+        # Build mentors query
+        mentors_query = {
+            "role": "internal_mentor",
+            "isDeleted": {"$ne": True}
+        }
+        
+        if college_id_obj:
+            mentors_query["$or"] = [
+                {"createdBy": caller_id},        # TTC (ObjectId)
+                {"createdBy": college_id_obj}    # Principal (ObjectId)
+            ]
+            print(f"   Query with $or:")
+            print(f"      - createdBy TTC: {caller_id}")
+            print(f"      - createdBy Principal: {college_id_obj}")
+        else:
+            mentors_query["createdBy"] = caller_id
+            print(f"   Query only TTC: {caller_id}")
+        
+        print(f"   Full query: {mentors_query}")
+        
+        # Check what mentors exist in DB
+        all_internal_mentors = list(users_coll.find(
+            {"role": "internal_mentor", "isDeleted": {"$ne": True}},
+            {"_id": 1, "name": 1, "createdBy": 1, "ttcCoordinatorId": 1}
+        ))
+        print(f"\n   📋 ALL Internal Mentors in DB ({len(all_internal_mentors)}):")
+        for m in all_internal_mentors:
+            print(f"      - {m.get('name')} | createdBy: {m.get('createdBy')} | ttcCoord: {m.get('ttcCoordinatorId')}")
+        
+        mentors_count = users_coll.count_documents(mentors_query)
+        
+        print(f"\n   ✅ Mentors matching query: {mentors_count}")
+        print("=" * 80)
+        
+        
+        # 5. Upcoming consultations (from ideas with consultationMentorId)
+        upcoming_consultations_query = {
+            "innovatorId": {"$in": innovator_ids},
+            "consultationMentorId": {"$exists": True, "$ne": None},
+            "consultationStatus": {"$in": ["assigned", "rescheduled"]},
+            "isDeleted": {"$ne": True}
+        }
+        
+        upcoming_consultations = list(
+            ideas_coll.find(upcoming_consultations_query)
+            .sort("consultationScheduledAt", 1)
+            .limit(10)
+        )
+        
+        print(f"📅 Upcoming consultations: {len(upcoming_consultations)}")
+        
+        # 6. Status distribution (by overallScore)
+        status_distribution = {
+            "approved": 0,   # Score >= 85
+            "improvise": 0,  # 60 <= Score < 85
+            "rejected": 0,   # Score < 60
+            "pending": 0     # No score yet
+        }
+        
+        for idea in all_ideas:
+            score = idea.get('overallScore')
+            if score is None:
+                status_distribution["pending"] += 1
+            elif score >= 85:
+                status_distribution["approved"] += 1
+            elif score >= 60:
+                status_distribution["improvise"] += 1
+            else:
+                status_distribution["rejected"] += 1
+        
+        print(f"📊 Status Distribution: {status_distribution}")
+        
+        # 7. Top innovators by average score
+        innovator_scores = {}
+        for idea in all_ideas:
+            innovator_id = idea.get('innovatorId')
+            score = idea.get('overallScore')
+            if innovator_id and score is not None:
+                innovator_id_str = str(innovator_id)
+                if innovator_id_str not in innovator_scores:
+                    innovator_scores[innovator_id_str] = []
+                innovator_scores[innovator_id_str].append(score)
+        
+        top_innovators = []
+        for user_id_str, scores in innovator_scores.items():
+            avg_score = sum(scores) / len(scores) if scores else 0
+            innovator = next((inv for inv in innovators if str(inv["_id"]) == user_id_str), None)
+            if innovator:
+                top_innovators.append({
+                    "userId": user_id_str,
+                    "name": innovator.get('name', 'Unknown'),
+                    "avgScore": round(avg_score, 2),
+                    "totalIdeas": len(scores)
+                })
+        
+        top_innovators = sorted(top_innovators, key=lambda x: x['avgScore'], reverse=True)[:5]
+        
+        print(f"🏆 Top Innovators: {[i['name'] for i in top_innovators]}")
+        
+        # 8. Format upcoming consultations
+        formatted_consultations = []
+        for idea in upcoming_consultations:
+            innovator_id = idea.get('innovatorId')
+            innovator = next((inv for inv in innovators if inv["_id"] == innovator_id), None)
+            
+            # Get mentor details
+            mentor_id = idea.get('consultationMentorId')
+            mentor = None
+            if mentor_id:
+                try:
+                    if isinstance(mentor_id, str):
+                        mentor_id = ObjectId(mentor_id)
+                    mentor = users_coll.find_one({"_id": mentor_id})
+                except:
+                    pass
+            
+            scheduled_at = idea.get('consultationScheduledAt')
+            
+            formatted_consultations.append({
+                "id": str(idea["_id"]),
+                "ideaId": str(idea["_id"]),
+                "title": idea.get('title', 'Untitled Idea'),
+                "innovatorId": str(innovator_id),
+                "innovatorName": innovator.get('name', 'Unknown') if innovator else 'Unknown',
+                "mentor": mentor.get('name', 'TBD') if mentor else 'TBD',
+                "mentorEmail": mentor.get('email', '') if mentor else '',
+                "scheduledDate": scheduled_at.strftime('%Y-%m-%d') if scheduled_at else None,
+                "scheduledTime": scheduled_at.strftime('%H:%M') if scheduled_at else None,
+                "status": idea.get('consultationStatus', 'assigned'),
+                "notes": idea.get('consultationNotes', ''),
+                "overallScore": idea.get('overallScore', 0)
+            })
+        
+        print("=" * 80)
+        print("✅ COORDINATOR DASHBOARD DATA COMPILED SUCCESSFULLY")
+        print("=" * 80)
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "totalInnovators": total_innovators,
+                "totalAssignedIdeas": total_assigned_ideas,
+                "pendingEvaluations": pending_evaluations,
+                "internalMentors": mentors_count,
+                "upcomingConsultations": len(formatted_consultations),
+                "statusDistribution": status_distribution,
+                "topInnovators": top_innovators,
+                "consultations": formatted_consultations
+            }
+        }), 200
+        
+    except Exception as e:
+        print("=" * 80)
+        print(f"❌ ERROR in get_dashboard_stats: {type(e).__name__}")
+        print(f"❌ Message: {str(e)}")
+        print("=" * 80)
+        current_app.logger.exception(f"❌ Dashboard stats error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "error": "Failed to fetch dashboard statistics",
+            "details": str(e)
+        }), 500
+
+
+@coordinator_bp.route('/stats/consultations', methods=['GET'])
+@requires_role(['ttc_coordinator'])
+def get_all_consultations():
+    """
+    Get all consultations for innovators under this TTC Coordinator.
+    Consultations are stored in ideas collection with consultationMentorId field.
+    
+    Query params:
+        - status: Filter by consultation status (optional)
+        - upcoming: Boolean to get only upcoming consultations (optional)
+    """
+    try:
+        caller_id = request.user_id
+        
+        # Convert to ObjectId
+        if isinstance(caller_id, str):
+            caller_id = ObjectId(caller_id)
+        
+        # Get query params
+        status_filter = request.args.get('status')
+        upcoming_only = request.args.get('upcoming', 'false').lower() == 'true'
+
+        # Get innovator IDs
+        innovators = list(users_coll.find({
+            "role": "innovator",
+            "ttcCoordinatorId": caller_id,
+            "isDeleted": {"$ne": True}
+        }))
+        
+        innovator_ids = [str(inv["_id"]) for inv in innovators]
+
+        if not innovator_ids:
+            return jsonify({
+                "success": True,
+                "data": {
+                    "consultations": [],
+                    "total": 0
+                }
+            }), 200
+
+        # Build query - consultations are in ideas with consultationMentorId
+        query = {
+            "$or": [
+                {"innovatorId": {"$in": innovator_ids}},
+                {"userId": {"$in": innovator_ids}}
+            ],
+            "consultationMentorId": {"$exists": True, "$ne": None},
+            "isDeleted": {"$ne": True}
+        }
+        
+        if status_filter:
+            query["consultationStatus"] = status_filter
+        
+        if upcoming_only:
+            query["consultationScheduledAt"] = {"$gte": datetime.now(timezone.utc)}
+
+        # Fetch consultations (ideas with consultation data)
+        consultations = list(ideas_coll.find(query).sort("consultationScheduledAt", -1))
+
+        # Get innovator details
+        innovator_map = {str(inv["_id"]): inv for inv in innovators}
+
+        # Get mentor IDs and fetch mentors
+        mentor_ids = [ObjectId(c.get('consultationMentorId')) for c in consultations if c.get('consultationMentorId')]
+        mentors = {
+            str(m["_id"]): m 
+            for m in users_coll.find({"_id": {"$in": mentor_ids}})
+        }
+
+        # Format response
+        formatted = []
+        for consult in consultations:
+            innovator_id = consult.get('innovatorId') or consult.get('userId')
+            innovator = innovator_map.get(innovator_id, {})
+            mentor = mentors.get(consult.get('consultationMentorId'), {})
+            
+            scheduled_at = consult.get('consultationScheduledAt')
+            
+            formatted.append({
+                "id": str(consult["_id"]),
+                "ideaId": str(consult["_id"]),
+                "ideaTitle": consult.get('title', 'Untitled Idea'),
+                "domain": consult.get('domain', ''),
+                "innovatorId": innovator_id,
+                "innovatorName": innovator.get('name', 'Unknown'),
+                "innovatorEmail": innovator.get('email', ''),
+                "mentorId": consult.get('consultationMentorId'),
+                "mentorName": mentor.get('name', 'Mentor'),
+                "mentorEmail": mentor.get('email', ''),
+                "scheduledDate": scheduled_at.strftime('%Y-%m-%d') if scheduled_at else '',
+                "scheduledTime": scheduled_at.strftime('%H:%M') if scheduled_at else '',
+                "scheduledAt": scheduled_at.isoformat() if scheduled_at else '',
+                "status": consult.get('consultationStatus', 'assigned'),
+                "notes": consult.get('consultationNotes', ''),
+                "overallScore": consult.get('overallScore', 0),
+                "createdAt": consult.get('createdAt', ''),
+                "updatedAt": consult.get('updatedAt', '')
+            })
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "consultations": formatted,
+                "total": len(formatted)
+            }
+        }), 200
+
+    except Exception as e:
+        current_app.logger.exception(f"❌ Consultations fetch error: {e}")
+        return jsonify({
+            "error": "Failed to fetch consultations",
+            "details": str(e)
+        }), 500
+
+
+@coordinator_bp.route('/stats/ideas', methods=['GET'])
+@requires_role(['ttc_coordinator'])
+def get_coordinator_ideas():
+    """
+    Get all ideas submitted by innovators under this coordinator.
+    
+    Query params:
+        - status: Filter by score range (approved/improvise/rejected/pending)
+        - limit: Number of results (default 50)
+        - offset: Pagination offset (default 0)
+    """
+    try:
+        caller_id = request.user_id
+        
+        # Convert to ObjectId
+        if isinstance(caller_id, str):
+            caller_id = ObjectId(caller_id)
+        
+        # Get query params
+        status_filter = request.args.get('status')
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+
+        # Get innovator IDs
+        innovators = list(users_coll.find({
+            "role": "innovator",
+            "ttcCoordinatorId": caller_id,
+            "isDeleted": {"$ne": True}
+        }))
+        
+        innovator_ids = [str(inv["_id"]) for inv in innovators]
+
+        if not innovator_ids:
+            return jsonify({
+                "success": True,
+                "data": {
+                    "ideas": [],
+                    "total": 0
+                }
+            }), 200
+
+        # Build query
+        query = {
+            "$or": [
+                {"innovatorId": {"$in": innovator_ids}},
+                {"userId": {"$in": innovator_ids}}
+            ],
+            "isDeleted": {"$ne": True}
+        }
+        
+        # Filter by status (score ranges)
+        if status_filter:
+            if status_filter == 'approved':
+                query["overallScore"] = {"$gte": 85}
+            elif status_filter == 'improvise':
+                query["overallScore"] = {"$gte": 60, "$lt": 85}
+            elif status_filter == 'rejected':
+                query["overallScore"] = {"$lt": 60}
+            elif status_filter == 'pending':
+                query["overallScore"] = None
+
+        # Fetch ideas with pagination
+        total = ideas_coll.count_documents(query)
+        ideas = list(ideas_coll.find(query)
+                    .sort("createdAt", -1)
+                    .skip(offset)
+                    .limit(limit))
+
+        # Get innovator details
+        innovator_map = {str(inv["_id"]): inv for inv in innovators}
+
+        # Format response
+        formatted = []
+        for idea in ideas:
+            innovator_id = idea.get('innovatorId') or idea.get('userId')
+            innovator = innovator_map.get(innovator_id, {})
+            
+            # Determine status from score
+            score = idea.get('overallScore')
+            if score is None:
+                status = 'pending'
+            elif score >= 85:
+                status = 'approved'
+            elif score >= 60:
+                status = 'improvise'
+            else:
+                status = 'rejected'
+            
+            formatted.append({
+                "_id": str(idea["_id"]),
+                "title": idea.get('title'),
+                "description": idea.get('concept', idea.get('description', '')),
+                "domain": idea.get('domain'),
+                "status": status,
+                "overallScore": score or 0,
+                "userId": innovator_id,
+                "userName": innovator.get('name', 'Unknown'),
+                "userEmail": innovator.get('email', ''),
+                "createdAt": idea.get('createdAt'),
+                "updatedAt": idea.get('updatedAt'),
+                "hasConsultation": bool(idea.get('consultationMentorId'))
+            })
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "ideas": formatted,
+                "total": total,
+                "limit": limit,
+                "offset": offset
+            }
+        }), 200
+
+    except Exception as e:
+        current_app.logger.exception(f"❌ Ideas fetch error: {e}")
+        return jsonify({
+            "error": "Failed to fetch ideas",
+            "details": str(e)
+        }), 500

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from app.utils.validators import normalize_user_id, normalize_any_id_field, clean_doc, get_user_by_any_id
 from app.utils.id_helpers import find_user, ids_match
+from app.services.audit_service import AuditService
+
 
 credits_bp = Blueprint('credits', __name__, url_prefix='/api/credits')
 
@@ -98,6 +100,13 @@ def innovator_credit_request():
         )
     except Exception as e:
         print(f"⚠️ Failed to send notification: {e}")
+
+    AuditService.log_credit_request(
+        actor_id=user_id,
+        request_id=rid,
+        amount=amount,
+        recipient=innovator.get('name')
+    )
     
     return jsonify({
         "requestId": str(rid),
@@ -220,6 +229,15 @@ def ttc_decide_credit_request(rid):
                 }
             }
         )
+
+        AuditService.log_action(
+            actor_id=ttc_id,
+            action=f"Rejected {amount} credits for {innovator.get('name')}",
+            category=AuditService.CATEGORY_CREDIT,
+            target_id=rid,
+            target_type="credit_request",
+            metadata={"reason": reject_reason}
+        )
         
         # ✅ NOTIFY INNOVATOR about rejection
         try:
@@ -282,6 +300,13 @@ def ttc_decide_credit_request(rid):
         )
     except Exception as e:
         print(f"⚠️ Failed to notify innovator: {e}")
+
+    AuditService.log_credit_approved(
+        actor_id=ttc_id,
+        request_id=rid,
+        amount=amount,
+        recipient=innovator.get('name')
+    )
     
     return jsonify({"success": True, "message": "Request approved"}), 200
 
@@ -333,6 +358,13 @@ def ttc_request_from_college():
             'ttcName': ttc.get('name', 'TTC Coordinator'),
             'amount': amount
         }
+    )
+
+    AuditService.log_credit_request(
+        actor_id=request.user_id,
+        request_id=rid,
+        amount=amount,
+        recipient=ttc.get('name')
     )
     
     return jsonify({
@@ -490,6 +522,14 @@ def college_decide_ttc_request(rid):
                 }
             }
         )
+        AuditService.log_action(
+    actor_id=admin_id,
+            action=f"Rejected {amount} credits for {ttc.get('name')}",
+            category=AuditService.CATEGORY_CREDIT,
+            target_id=rid,
+            target_type="credit_request",
+            metadata={"reason": reject_reason}
+        )
         
         # ✅ NOTIFY TTC about rejection
         try:
@@ -542,7 +582,12 @@ def college_decide_ttc_request(rid):
             }
         }
     )
-    
+    AuditService.log_credit_approved(
+        actor_id=admin_id,
+        request_id=rid,
+        amount=amount,
+        recipient=ttc.get('name')
+    )
     # ✅ NOTIFY TTC about approval
     try:
         NotificationService.create_notification(
@@ -621,6 +666,13 @@ def delete_credit_request(request_id):
         "from": request.user_id,
         "status": "pending"
     })
+    AuditService.log_action(
+        actor_id=request.user_id,
+        action=f"Cancelled credit request for {doc.get('amount')} credits",
+        category=AuditService.CATEGORY_CREDIT,
+        target_id=request_id,
+        target_type="credit_request"
+    )
     
     if res.deleted_count == 0:
         return jsonify({"error": "Request not found or not yours"}), 404

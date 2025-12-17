@@ -33,273 +33,212 @@ def before_audit_request():
 
 
 @audit_bp.route("/trail", methods=["GET"])
-def get_audit_trail_raw():
+@requires_role(['college_admin', 'ttc_coordinator', 'super_admin'])
+def get_audit_trail():
     """
-    Get audit trail logs - NO DECORATORS for debugging
+    Get audit trail logs with proper role-based filtering.
     """
-    print("\n" + "🎯" * 40)
-    print("✅ [AUDIT TRAIL] ROUTE HANDLER ENTERED!!!")
-    print(f"✅ Method: {request.method}")
-    print(f"✅ Path: {request.path}")
-    print(f"✅ Args: {dict(request.args)}")
-    print("🎯" * 40 + "\n")
+    caller_id = request.user_id
+    caller_role = request.user_role
     
-    try:
-        # Manual auth check
-        auth_header = request.headers.get('Authorization')
-        print(f"🔐 Authorization header: {auth_header[:50] if auth_header else 'NONE'}...")
+    # Convert to ObjectId
+    if isinstance(caller_id, str):
+        caller_id_obj = ObjectId(caller_id)
+    else:
+        caller_id_obj = caller_id
+    caller_id_str = str(caller_id_obj)
+    
+    print(f"\n📊 Audit Trail Request:")
+    print(f"  Role: {caller_role}")
+    print(f"  User ID: {caller_id_str}")
+    
+    # Pagination
+    page = int(request.args.get("page", 1))
+    limit = int(request.args.get("limit", 50))
+    skip = (page - 1) * limit
+    
+    # Build query
+    query = {}
+    
+    # ✅ Role-based filtering
+    if caller_role == "college_admin":
+        # College admin sees logs for their college
+        # Their _id IS the collegeId
+        query["collegeId"] = caller_id_str
+        print(f"  Filter: collegeId = {caller_id_str}")
         
-        if not auth_header:
-            print("❌ No auth header")
-            return jsonify({"error": "Missing authorization"}), 401
-        
-        # Decode token manually
-        try:
-            from app.services.auth_service import AuthService
-            from flask import current_app
-            
-            token = auth_header.replace('Bearer ', '').strip()
-            auth_service = AuthService(current_app.config['JWT_SECRET'])
-            payload = auth_service.decode_token(token)
-            
-            caller_id = payload.get('uid')
-            caller_role = payload.get('role')
-            
-            print(f"✅ Token decoded:")
-            print(f"   User ID: {caller_id}")
-            print(f"   User Role: {caller_role}")
-            
-        except Exception as e:
-            print(f"❌ Token decode failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return jsonify({"error": "Invalid token"}), 401
-        
-        # Check role
-        allowed_roles = ["college_admin", "principal", "college_principal", "admin", "super_admin"]
-        print(f"🔍 Role check: '{caller_role}' in {allowed_roles} = {caller_role in allowed_roles}")
-        
-        if caller_role not in allowed_roles:
-            print(f"❌ Role denied: {caller_role}")
-            return jsonify({
-                "error": "Access denied",
-                "yourRole": caller_role,
-                "allowedRoles": allowed_roles
-            }), 403
-        
-        print(f"✅ Role authorized: {caller_role}")
-        
-        # Convert caller_id to ObjectId
-        if isinstance(caller_id, str):
-            caller_id_obj = ObjectId(caller_id)
+    elif caller_role == "ttc_coordinator":
+        # TTC sees logs from their college
+        # Get their collegeId first
+        ttc = users_coll.find_one({"_id": caller_id_obj}, {"collegeId": 1})
+        if ttc and ttc.get("collegeId"):
+            query["collegeId"] = ttc["collegeId"]
+            print(f"  Filter: collegeId = {ttc['collegeId']}")
         else:
-            caller_id_obj = caller_id
-        
-        # Pagination
-        page = int(request.args.get("page", 1))
-        limit = int(request.args.get("limit", 50))
-        skip = (page - 1) * limit
-        
-        print(f"📄 Pagination: page={page}, limit={limit}, skip={skip}")
-        
-        # Build query
-        query = {}
-        
-        # Role-based filtering
-        admin_roles = ["college_admin", "principal", "college_principal", "admin"]
-        
-        if caller_role in admin_roles:
-            print(f"🏛️ College admin filtering...")
+            # No college assigned, return empty
+            print(f"  No college assigned to TTC")
+            return jsonify({
+                "success": True,
+                "data": [],
+                "pagination": {"page": page, "limit": limit, "total": 0, "pages": 0}
+            }), 200
             
-            # 🔧 FIX: Filter by college admin's _id (which IS the college identifier)
-            # The collegeId in audit logs should match the college admin's _id
-            college_id_str = str(caller_id_obj)
-            
-            query["collegeId"] = college_id_str
-            print(f"✅ Filtering audit logs where collegeId = {college_id_str}")
-            
-        elif caller_role == "super_admin":
-            print(f"✅ Super admin - no filtering")
-        
-        # Category filter
-        category = request.args.get("category")
-        if category and category != "all":
-            query["category"] = category
-            print(f"🏷️ Category filter: {category}")
-        
-        # Search filter
-        search = request.args.get("search")
-        if search:
-            query["$or"] = [
-                {"actor": {"$regex": search, "$options": "i"}},
-                {"action": {"$regex": search, "$options": "i"}},
-                {"actorEmail": {"$regex": search, "$options": "i"}}
-            ]
-            print(f"🔍 Search filter: {search}")
-        
-        # Date range filter
-        start_date = request.args.get("startDate")
-        end_date = request.args.get("endDate")
-        
-        if start_date or end_date:
-            date_filter = {}
-            if start_date:
-                try:
-                    date_filter["$gte"] = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-                except:
-                    pass
-            if end_date:
-                try:
-                    end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-                    date_filter["$lt"] = end_dt + timedelta(days=1)
-                except:
-                    pass
-            
-            if date_filter:
-                query["timestamp"] = date_filter
-                print(f"📅 Date filter: {date_filter}")
-        
-        print(f"\n📊 Final MongoDB query: {query}\n")
-        
-        # Get total count
-        total = audit_logs_coll.count_documents(query)
-        print(f"📊 Total matching logs: {total}")
-        
-        # Fetch logs
-        cursor = audit_logs_coll.find(query).sort("timestamp", -1).skip(skip).limit(limit)
-        
-        logs = []
-        for log in cursor:
-            logs.append({
-                "id": str(log.get("_id")),
-                "logId": log.get("logId"),
-                "timestamp": log.get("timestamp").isoformat() if log.get("timestamp") else "",
-                "actor": log.get("actor"),
-                "actorEmail": log.get("actorEmail"),
-                "actorRole": log.get("actorRole"),
-                "action": log.get("action"),
-                "category": log.get("category"),
-                "targetId": str(log.get("targetId")) if log.get("targetId") else None,
-                "targetType": log.get("targetType"),
-                "metadata": log.get("metadata", {})
-            })
-        
-        print(f"✅ Returning {len(logs)} logs")
-        print("🎯" * 40 + "\n")
-        
-        return jsonify({
-            "success": True,
-            "data": logs,
-            "pagination": {
-                "page": page,
-                "limit": limit,
-                "total": total,
-                "pages": (total + limit - 1) // limit
-            }
-        }), 200
-        
-    except Exception as e:
-        print(f"\n❌ EXCEPTION in get_audit_trail:")
-        print(f"   Type: {type(e).__name__}")
-        print(f"   Message: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        print("\n")
-        
-        return jsonify({"error": str(e)}), 500
+    elif caller_role == "super_admin":
+        # Super admin sees all logs
+        print(f"  Filter: None (super admin)")
+    
+    else:
+        # Other roles not allowed
+        return jsonify({"error": "Access denied"}), 403
+    
+    # Category filter
+    category = request.args.get("category")
+    if category and category != "all":
+        query["category"] = category
+    
+    # Search filter
+    search = request.args.get("search")
+    if search:
+        query["$or"] = [
+            {"actor": {"$regex": search, "$options": "i"}},
+            {"action": {"$regex": search, "$options": "i"}},
+            {"actorEmail": {"$regex": search, "$options": "i"}}
+        ]
+    
+    # Date range filter
+    start_date = request.args.get("startDate")
+    end_date = request.args.get("endDate")
+    if start_date or end_date:
+        date_filter = {}
+        if start_date:
+            try:
+                date_filter["$gte"] = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            except:
+                pass
+        if end_date:
+            try:
+                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                date_filter["$lt"] = end_dt + timedelta(days=1)
+            except:
+                pass
+        if date_filter:
+            query["timestamp"] = date_filter
+    
+    print(f"  Final Query: {query}\n")
+    
+    # Get total count
+    total = audit_logs_coll.count_documents(query)
+    print(f"  Total matching: {total}")
+    
+    # Fetch logs
+    cursor = audit_logs_coll.find(query).sort("timestamp", -1).skip(skip).limit(limit)
+    
+    logs = []
+    for log in cursor:
+        logs.append({
+            "id": str(log.get("_id")),
+            "logId": log.get("logId"),
+            "timestamp": log.get("timestamp").isoformat() if log.get("timestamp") else "",
+            "actor": log.get("actor"),
+            "actorEmail": log.get("actorEmail"),
+            "actorRole": log.get("actorRole"),
+            "action": log.get("action"),
+            "category": log.get("category"),
+            "targetId": log.get("targetId"),
+            "targetType": log.get("targetType"),
+            "metadata": log.get("metadata", {})
+        })
+    
+    return jsonify({
+        "success": True,
+        "data": logs,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "pages": (total + limit - 1) // limit
+        }
+    }), 200
 
 
 @audit_bp.route("/stats", methods=["GET"])
+@requires_role(['college_admin', 'ttc_coordinator', 'super_admin'])
 def get_audit_stats():
     """Get audit trail statistics"""
-    try:
-        # Manual auth
-        auth_header = request.headers.get('Authorization')
-        if not auth_header:
-            return jsonify({"error": "Missing authorization"}), 401
-        
-        from app.services.auth_service import AuthService
-        from flask import current_app
-        
-        token = auth_header.replace('Bearer ', '').strip()
-        auth_service = AuthService(current_app.config['JWT_SECRET'])
-        payload = auth_service.decode_token(token)
-        
-        caller_id = payload.get('uid')
-        caller_role = payload.get('role')
-        
-        # Convert to ObjectId
-        if isinstance(caller_id, str):
-            caller_id = ObjectId(caller_id)
-        
-        # Check role
-        allowed_roles = ["college_admin", "principal", "college_principal", "admin", "super_admin"]
-        if caller_role not in allowed_roles:
-            return jsonify({"error": "Access denied"}), 403
-        
-        # Build base query
-        base_query = {}
-        
-        admin_roles = ["college_admin", "principal", "college_principal", "admin"]
-        if caller_role in admin_roles:
-            # 🔧 Filter by college admin's _id
-            base_query["collegeId"] = str(caller_id)
-        
-        # Total logs
-        total_logs = audit_logs_coll.count_documents(base_query)
-        
-        # Logs by category
-        category_pipeline = [
-            {"$match": base_query},
-            {"$group": {
-                "_id": "$category",
-                "count": {"$sum": 1}
-            }}
-        ]
-        category_results = list(audit_logs_coll.aggregate(category_pipeline))
-        by_category = {item["_id"]: item["count"] for item in category_results}
-        
-        # Recent activity (last 7 days)
-        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
-        recent_query = {**base_query, "timestamp": {"$gte": seven_days_ago}}
-        recent_count = audit_logs_coll.count_documents(recent_query)
-        
-        # Most active users
-        active_users_pipeline = [
-            {"$match": base_query},
-            {"$group": {
-                "_id": "$actorId",
-                "actor": {"$first": "$actor"},
-                "actorRole": {"$first": "$actorRole"},
-                "actionCount": {"$sum": 1}
-            }},
-            {"$sort": {"actionCount": -1}},
-            {"$limit": 5}
-        ]
-        active_users_results = list(audit_logs_coll.aggregate(active_users_pipeline))
-        most_active_users = [
-            {
-                "userId": str(item["_id"]),
-                "name": item["actor"],
-                "role": item["actorRole"],
-                "actionCount": item["actionCount"]
-            }
-            for item in active_users_results
-        ]
-        
-        return jsonify({
-            "success": True,
-            "data": {
-                "totalLogs": total_logs,
-                "byCategory": by_category,
-                "recentActivityCount": recent_count,
-                "mostActiveUsers": most_active_users
-            }
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch audit stats: {e}")
-        return jsonify({"error": str(e)}), 500
+    caller_id = request.user_id
+    caller_role = request.user_role
+    
+    # Convert to ObjectId
+    if isinstance(caller_id, str):
+        caller_id_obj = ObjectId(caller_id)
+    else:
+        caller_id_obj = caller_id
+    caller_id_str = str(caller_id_obj)
+    
+    # Build base query
+    base_query = {}
+    
+    if caller_role == "college_admin":
+        base_query["collegeId"] = caller_id_str
+    elif caller_role == "ttc_coordinator":
+        ttc = users_coll.find_one({"_id": caller_id_obj}, {"collegeId": 1})
+        if ttc and ttc.get("collegeId"):
+            base_query["collegeId"] = ttc["collegeId"]
+        else:
+            return jsonify({
+                "success": True,
+                "data": {"totalLogs": 0, "byCategory": {}, "recentActivityCount": 0, "mostActiveUsers": []}
+            }), 200
+    # super_admin: no filter
+    
+    # Total logs
+    total_logs = audit_logs_coll.count_documents(base_query)
+    
+    # Logs by category
+    category_pipeline = [
+        {"$match": base_query},
+        {"$group": {"_id": "$category", "count": {"$sum": 1}}}
+    ]
+    category_results = list(audit_logs_coll.aggregate(category_pipeline))
+    by_category = {item["_id"]: item["count"] for item in category_results}
+    
+    # Recent activity (last 7 days)
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    recent_query = {**base_query, "timestamp": {"$gte": seven_days_ago}}
+    recent_count = audit_logs_coll.count_documents(recent_query)
+    
+    # Most active users
+    active_users_pipeline = [
+        {"$match": base_query},
+        {"$group": {
+            "_id": "$actorId",
+            "actor": {"$first": "$actor"},
+            "actorRole": {"$first": "$actorRole"},
+            "actionCount": {"$sum": 1}
+        }},
+        {"$sort": {"actionCount": -1}},
+        {"$limit": 5}
+    ]
+    active_users_results = list(audit_logs_coll.aggregate(active_users_pipeline))
+    most_active_users = [
+        {
+            "userId": item["_id"],
+            "name": item["actor"],
+            "role": item["actorRole"],
+            "actionCount": item["actionCount"]
+        }
+        for item in active_users_results
+    ]
+    
+    return jsonify({
+        "success": True,
+        "data": {
+            "totalLogs": total_logs,
+            "byCategory": by_category,
+            "recentActivityCount": recent_count,
+            "mostActiveUsers": most_active_users
+        }
+    }), 200
 
 
 @audit_bp.route("/export", methods=["GET"])

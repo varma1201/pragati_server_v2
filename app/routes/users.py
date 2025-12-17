@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 import uuid
 import json
 from bson import ObjectId
+from app.services.audit_service import AuditService
+
 
 users_bp = Blueprint('users', __name__, url_prefix='/api/users')
 

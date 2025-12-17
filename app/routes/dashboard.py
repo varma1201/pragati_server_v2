@@ -1,77 +1,84 @@
-"""
-Dashboard API - Statistics for all roles
-"""
-
-from flask import Blueprint, request, jsonify
-from app.database.mongo import users_coll, ideas_coll, results_coll
-from app.utils.id_helpers import find_user
-from datetime import datetime, timezone, timedelta
+from flask import Blueprint, request, jsonify, current_app
 from bson import ObjectId
+from datetime import datetime, timezone, timedelta
 from collections import defaultdict
+
+from app.database.mongo import users_coll, ideas_coll, results_coll
+from app.middleware.auth import requires_auth, requires_role
+from app.utils.validators import clean_doc, normalize_user_id
+
 import logging
 
-dashboard_bp = Blueprint("dashboard", __name__, url_prefix="/api/dashboard")
 logger = logging.getLogger(__name__)
 
+# ✅ CREATE BLUEPRINT with URL prefix
+dashboard_bp = Blueprint('dashboard', __name__, url_prefix='/api/dashboard')
 
-def authenticate_request():
-    """Helper function to authenticate"""
-    auth_header = request.headers.get('Authorization')
-    if not auth_header:
-        return None, None, {"error": "Missing authorization"}, 401
+
+# ✅ Helper function to find user
+def find_user(user_id):
+    """Find user by ID (supports both ObjectId and string)"""
+    if not user_id:
+        return None
     
     try:
-        from app.services.auth_service import AuthService
-        from flask import current_app
-        
-        token = auth_header.replace('Bearer ', '').strip()
-        auth_service = AuthService(current_app.config['JWT_SECRET'])
-        payload = auth_service.decode_token(token)
-        
-        caller_id = payload.get('uid')
-        caller_role = payload.get('role')
-        
-        if isinstance(caller_id, str):
-            caller_id = ObjectId(caller_id)
-        
-        return caller_id, caller_role, None, None
-    except Exception as e:
-        return None, None, {"error": "Authentication failed"}, 401
+        query = normalize_user_id(user_id)
+        query["isDeleted"] = {"$ne": True}
+        return users_coll.find_one(query)
+    except:
+        return None
 
 
+# ✅ USE @requires_role decorator instead of authenticate_request()
 @dashboard_bp.route("/principal/stats", methods=["GET"])
+@requires_role(['college_admin', 'principal'])  # ✅ Use decorator!
 def get_principal_stats():
     """
     Dashboard statistics for college principal/admin.
     """
+    print("=" * 80)
+    print("📊 PRINCIPAL STATS REQUESTED")
+    print("=" * 80)
+    
     try:
-        # Authenticate
-        caller_id, caller_role, error, status = authenticate_request()
-        if error:
-            return jsonify(error), status
-        
-        # Check role
-        if caller_role not in ["college_admin", "principal"]:
-            return jsonify({"error": "Access denied"}), 403
+        # ✅ Get user info from request object (set by middleware)
+        caller_id = request.user_id
+        caller_role = request.user_role
         
         logger.info(f"📊 Principal stats requested by {caller_id}")
         
+        # Convert to ObjectId if string
+        if isinstance(caller_id, str):
+            try:
+                caller_id = ObjectId(caller_id)
+            except:
+                pass
+        
         # College ID = principal's _id
         college_id = caller_id
+        college_id_str = str(college_id)
+        
+        print(f"👤 College Admin ID: {college_id_str}")
+        print(f"👤 Role: {caller_role}")
         
         # =========================================================================
         # 1. CREDITS TRACKING
         # =========================================================================
         principal = users_coll.find_one({"_id": college_id})
+        if not principal:
+            return jsonify({"error": "College admin not found"}), 404
+        
         credits_total = principal.get("creditQuota", 0)
         credits_used = principal.get("creditsUsed", 0)
         credits_available = max(0, credits_total - credits_used)
+        
+        print(f"💰 Credits: Total={credits_total}, Used={credits_used}, Available={credits_available}")
         
         # =========================================================================
         # 2. TTC COORDINATORS
         # =========================================================================
         ttc_count = users_coll.count_documents({
-            "collegeId": college_id,
+            "collegeId": college_id_str,
             "role": "ttc_coordinator",
             "isDeleted": {"$ne": True}
         })
@@ -80,26 +87,33 @@ def get_principal_stats():
         
         # Get TTC IDs for filtering innovators
         ttc_ids = users_coll.distinct("_id", {
-            "collegeId": college_id,
+            "collegeId": college_id_str,
             "role": "ttc_coordinator",
             "isDeleted": {"$ne": True}
         })
+        
+        ttc_ids_str = [str(tid) for tid in ttc_ids]
+        
+        print(f"👥 TTC Coordinators: {ttc_count} (limit: {ttc_limit})")
+        print(f"📋 TTC IDs: {ttc_ids_str}")
         
         # =========================================================================
         # 3. INNOVATORS
         # =========================================================================
         innovator_count = users_coll.count_documents({
-            "ttcCoordinatorId": {"$in": ttc_ids},
-            "role": "innovator",
+            "ttcCoordinatorId": {"$in": ttc_ids_str},
+            "role": {"$in": ["innovator", "individual_innovator"]},
             "isDeleted": {"$ne": True}
         })
         
         # Get innovator IDs for filtering ideas
         innovator_ids = users_coll.distinct("_id", {
-            "ttcCoordinatorId": {"$in": ttc_ids},
-            "role": "innovator",
+            "ttcCoordinatorId": {"$in": ttc_ids_str},
+            "role": {"$in": ["innovator", "individual_innovator"]},
             "isDeleted": {"$ne": True}
         })
+        
+        print(f"👨‍🎓 Innovators: {innovator_count}")
         
         # =========================================================================
         # 4. IDEAS
@@ -110,20 +124,18 @@ def get_principal_stats():
         }))
         
         idea_count = len(ideas)
+        print(f"💡 Ideas: {idea_count}")
         
         # =========================================================================
         # 5. IDEA STATUS DISTRIBUTION
         # =========================================================================
         status_counts = defaultdict(int)
-        
         for idea in ideas:
-            result = results_coll.find_one({"ideaId": idea["_id"]})
-            
+            result = results_coll.find_one({"ideaId": str(idea["_id"])})
             if result:
                 outcome = result.get("validationOutcome", "Pending")
             else:
-                outcome = idea.get("stage", "Pending")
-            
+                outcome = idea.get("status", "Pending")
             status_counts[outcome] += 1
         
         status_distribution = [
@@ -133,36 +145,49 @@ def get_principal_stats():
             {"name": "Pending", "value": status_counts.get("Pending", 0)},
         ]
         
-        # =========================================================================
-        # 6. SUBMISSION TREND (Last 6 months by month)
-        # =========================================================================
-        six_months_ago = datetime.now(timezone.utc) - timedelta(days=180)
+        print(f"📊 Status Distribution: {status_distribution}")
         
+        # =========================================================================
+        # 6. SUBMISSION TREND (Last 6 months)
+        # =========================================================================
+        now = datetime.now(timezone.utc)
+        six_months_ago = now - timedelta(days=180)
         submission_trend = defaultdict(int)
+        
+        print(f"📅 Analyzing submission trend from {six_months_ago.strftime('%Y-%m-%d')}")
+        
         for idea in ideas:
             submitted_at = idea.get("submittedAt")
-            if submitted_at and submitted_at >= six_months_ago:
-                month_key = submitted_at.strftime("%b")
-                submission_trend[month_key] += 1
+            if submitted_at:
+                # Ensure timezone-aware comparison
+                if submitted_at.tzinfo is None:
+                    # Assume UTC if no timezone
+                    submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+                
+                if submitted_at >= six_months_ago:
+                    month_key = submitted_at.strftime("%b %Y")
+                    submission_trend[month_key] += 1
+                    print(f"   ✓ Idea submitted: {submitted_at.strftime('%Y-%m-%d')} -> {month_key}")
         
-        # Sort by chronological order
-        month_order = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        current_month = datetime.now().month
-        
-        # Get last 6 months in order
+        # Generate last 6 months in chronological order
         last_6_months = []
         for i in range(5, -1, -1):
-            month_idx = (current_month - i - 1) % 12
-            month_name = month_order[month_idx]
-            last_6_months.append({"name": month_name, "ideas": submission_trend.get(month_name, 0)})
+            month = now - timedelta(days=30 * i)
+            month_key = month.strftime("%b %Y")
+            count = submission_trend.get(month_key, 0)
+            last_6_months.append({"name": month_key, "ideas": count})
+            print(f"   {month_key}: {count} ideas")
+        
+        print(f"📅 Submission Trend: {last_6_months}")
+        
         
         # =========================================================================
-        # 7. TOP INNOVATORS (by average score)
+        # 7. TOP INNOVATORS
         # =========================================================================
         innovator_scores = defaultdict(lambda: {"total": 0, "count": 0, "name": ""})
         
         for idea in ideas:
-            result = results_coll.find_one({"ideaId": idea["_id"]})
+            result = results_coll.find_one({"ideaId": str(idea["_id"])})
             if result and result.get("overallScore"):
                 innovator_id = idea.get("innovatorId")
                 score = result.get("overallScore", 0)
@@ -188,33 +213,58 @@ def get_principal_stats():
         top_innovators.sort(key=lambda x: x["score"], reverse=True)
         top_innovators = top_innovators[:5]
         
+        print(f"🏆 Top Innovators: {[i['name'] for i in top_innovators]}")
+        
         # =========================================================================
-        # 8. CLUSTER PERFORMANCE (Average scores across all ideas)
+        # 8. CLUSTER PERFORMANCE
         # =========================================================================
         cluster_scores = defaultdict(list)
         
         for idea in ideas:
-            result = results_coll.find_one({"ideaId": idea["_id"]})
-            if result and result.get("sections", {}).get("detailedEvaluation", {}).get("clusters"):
-                clusters = result["sections"]["detailedEvaluation"]["clusters"]
-                
-                for cluster_name, cluster_data in clusters.items():
-                    # Calculate average score for this cluster
-                    scores = []
-                    for param_data in cluster_data.values():
-                        for sub_param_data in param_data.values():
-                            if isinstance(sub_param_data, dict) and "assignedScore" in sub_param_data:
-                                scores.append(sub_param_data["assignedScore"])
-                    
-                    if scores:
-                        cluster_avg = sum(scores) / len(scores)
-                        cluster_scores[cluster_name].append(cluster_avg)
+            result = results_coll.find_one({"ideaId": str(idea["_id"])})
+            if result:
+                cluster_scores_obj = result.get("clusterScores", {})
+                for cluster_name, score in cluster_scores_obj.items():
+                    if score is not None:
+                        cluster_scores[cluster_name].append(score)
         
-        # Calculate overall cluster averages
-        avg_cluster_scores = {}
+        # Calculate averages
+        cluster_performance = []
         for cluster_name, scores in cluster_scores.items():
             if scores:
-                avg_cluster_scores[cluster_name] = round(sum(scores) / len(scores), 2)
+                avg_score = round(sum(scores) / len(scores), 2)
+                cluster_performance.append({
+                    "cluster": cluster_name,
+                    "score": avg_score
+                })
+        
+        print(f"🕸️  Cluster Performance: {cluster_performance}")
+        
+        # =========================================================================
+        # 9. STATISTICS
+        # =========================================================================
+        validated_ideas = [i for i in ideas if results_coll.find_one({"ideaId": str(i["_id"])})]
+        
+        avg_score = 0
+        if validated_ideas:
+            total_score = 0
+            for idea in validated_ideas:
+                result = results_coll.find_one({"ideaId": str(idea["_id"])})
+                if result:
+                    total_score += result.get("overallScore", 0)
+            avg_score = round(total_score / len(validated_ideas), 2) if validated_ideas else 0
+        
+        statistics = {
+            "ttcCount": ttc_count,
+            "innovatorCount": innovator_count,
+            "ideaCount": idea_count,
+            "validatedIdeas": len(validated_ideas),
+            "averageScore": avg_score
+        }
+        
+        print("=" * 80)
+        print("✅ DASHBOARD DATA COMPILED SUCCESSFULLY")
+        print("=" * 80)
         
         # =========================================================================
         # RESPONSE
@@ -229,53 +279,23 @@ def get_principal_stats():
                 },
                 "ttc": {
                     "used": ttc_count,
-                    "total": ttc_limit
+                    "total": ttc_limit,
+                    "available": ttc_limit - ttc_count
                 },
-                "statistics": {
-                    "ttcCount": ttc_count,
-                    "innovatorCount": innovator_count,
-                    "ideaCount": idea_count
-                },
+                "statistics": statistics,
                 "statusDistribution": status_distribution,
                 "submissionTrend": last_6_months,
                 "topInnovators": top_innovators,
-                "clusterPerformance": avg_cluster_scores
+                "clusterPerformance": cluster_performance
             }
         }), 200
         
     except Exception as e:
+        print("=" * 80)
+        print(f"❌ ERROR in get_principal_stats: {type(e).__name__}")
+        print(f"❌ Message: {str(e)}")
+        print("=" * 80)
         logger.error(f"Failed to fetch principal stats: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-
-@dashboard_bp.route("/my-credits", methods=["GET"])
-def get_my_credits():
-    """Get credit information for any user role"""
-    try:
-        caller_id, caller_role, error, status = authenticate_request()
-        if error:
-            return jsonify(error), status
-        
-        user = users_coll.find_one({"_id": caller_id})
-        if not user:
-            return jsonify({"error": "User not found"}), 404
-        
-        credit_quota = user.get("creditQuota", 0)
-        credits_used = user.get("creditsUsed", 0)
-        credits_available = max(0, credit_quota - credits_used)
-        
-        return jsonify({
-            "success": True,
-            "data": {
-                "total": credit_quota,
-                "used": credits_used,
-                "available": credits_available,
-                "percentage": round((credits_used / credit_quota * 100) if credit_quota > 0 else 0, 2)
-            }
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch credits: {e}")
         return jsonify({"error": str(e)}), 500
