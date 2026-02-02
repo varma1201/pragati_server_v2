@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ idea_title }} - Pragati Report</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      body {
+          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+          line-height: 1.6;
+          color: #111827;
+          background: #ffffff;
+          font-size: 13px;
+      }
+
+      @page { size: A4; margin: 15mm; }
+      .page-break { page-break-after: always; }
+
+      /* ===== TYPOGRAPHY ===== */
+      h1 { font-size: 28px; font-weight: 700; color: #1f2937; margin-bottom: 12px; }
+      h2 { font-size: 20px; font-weight: 700; color: #1f2937; margin: 20px 0 12px;
+           border-bottom: 2px solid #667eea; padding-bottom: 8px; }
+      h3 { font-size: 16px; font-weight: 600; color: #374151; margin: 15px 0 8px; }
+      h4 { font-size: 14px; font-weight: 600; color: #4b5563; margin: 10px 0 6px; }
+      p { margin-bottom: 10px; color: #4b5563; line-height: 1.7; }
+      .text-small { font-size: 11px; color: #6b7280; }
+      .bold { font-weight: 600; color: #1f2937; }
+
+      /* ===== COVER PAGE ===== */
+      .cover-page {
+          text-align: center;
+          padding: 50px 30px;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white;
+          min-height: 100vh;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+      }
+      .cover-title { font-size: 38px; font-weight: 700; margin-bottom: 15px; }
+      .cover-subtitle { font-size: 16px; opacity: 0.9; margin-bottom: 30px; }
+      .score-display {
+          font-size: 60px; font-weight: 900; background: white;
+          color: {{ score_color }}; padding: 25px 40px; border-radius: 15px;
+          display: inline-block; margin: 20px 0;
+          box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+      }
+      .score-label { font-size: 14px; margin-top: 10px; opacity: 0.9; }
+      .cover-meta { margin-top: 30px; font-size: 12px; opacity: 0.85; }
+
+      /* ===== BADGES ===== */
+      .badge {
+          display: inline-block; padding: 4px 10px; border-radius: 999px;
+          font-size: 10px; text-transform: uppercase; font-weight: 600;
+          border: 1px solid #e5e7eb; background: #f9fafb; color: #374151;
+      }
+      .badge-danger { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+      .badge-success { background: #f0fdf4; border-color: #bbf7d0; color: #166534; }
+
+      /* ===== CARDS ===== */
+      .card {
+          background: white; border: 1px solid #e5e7eb; border-radius: 8px;
+          padding: 15px; margin-bottom: 12px; page-break-inside: avoid;
+      }
+      .card-primary { background: #eef2ff; border-color: #c7d2fe; }
+      .card-success { background: #f0fdf4; border-color: #bbf7d0; }
+      .card-info { background: #eff6ff; border-color: #bfdbfe; }
+      .card-warning { background: #fffbeb; border-color: #fef3c7; }
+
+      /* ===== GRIDS ===== */
+      .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+      .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 12px 0; }
+      .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0; }
+
+      /* ===== SECTION BOXES ===== */
+      .section { margin-bottom: 25px; page-break-inside: avoid; }
+      .section-content {
+          background: #f9fafb; padding: 15px; border-radius: 6px;
+          border-left: 3px solid #667eea;
+      }
+      .muted-box {
+          background: #f9fafb; padding: 10px; border-radius: 6px;
+          border: 1px solid #e5e7eb; font-size: 12px; color: #4b5563;
+      }
+      .info-box {
+          background: #eff6ff; padding: 12px; border-radius: 6px;
+          border-left: 3px solid #3b82f6; margin: 10px 0;
+      }
+      .info-box.indigo { background: #eef2ff; border-left-color: #6366f1; }
+      .info-box.amber { background: #fffbeb; border-left-color: #f59e0b; }
+      .info-box.success { background: #f0fdf4; border-left-color: #10b981; }
+
+      /* ===== PILL CARDS (for segments) ===== */
+      .pill-card {
+          background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px;
+          padding: 10px; margin-bottom: 8px;
+      }
+      .pill-title { font-weight: 600; font-size: 13px; color: #111827; margin-bottom: 3px; }
+      .pill-desc { font-size: 11px; color: #6b7280; }
+
+      /* ===== CHIPS (for key features) ===== */
+      .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+      .chip {
+          display: inline-block; padding: 2px 8px; border-radius: 999px;
+          font-size: 10px; background: #f3f4f6; border: 1px solid #d1d5db;
+      }
+
+      /* ===== RISK CARDS ===== */
+      .risk-card {
+          background: white; border: 1px solid #e5e7eb; border-radius: 6px;
+          padding: 12px; margin-bottom: 10px; border-left: 4px solid;
+          page-break-inside: avoid;
+      }
+      .risk-card.critical { border-left-color: #dc2626; background: #fef2f2; }
+      .risk-card.high { border-left-color: #ef4444; background: #fef2f2; }
+      .risk-card.medium { border-left-color: #f59e0b; background: #fffbeb; }
+      .risk-card.low { border-left-color: #10b981; background: #f0fdf4; }
+
+      .risk-header {
+          display: flex; justify-content: space-between; align-items: flex-start;
+          margin-bottom: 6px;
+      }
+      .risk-name { font-size: 14px; font-weight: 600; color: #111827; }
+      .risk-badges { display: flex; gap: 4px; flex-wrap: wrap; }
+      .risk-desc { font-size: 12px; color: #4b5563; margin-bottom: 8px; }
+
+      .pill {
+          display: inline-block; padding: 2px 8px; border-radius: 999px;
+          font-size: 10px; background: #e5e7eb; color: #374151;
+      }
+      .pill.severity { color: white; font-weight: 600; }
+      .pill.critical { background: #dc2626; }
+      .pill.high { background: #ef4444; }
+      .pill.medium { background: #f59e0b; }
+      .pill.low { background: #10b981; }
+
+      /* ===== METRICS ===== */
+      .metric-card {
+          background: white; border: 1px solid #e5e7eb; border-radius: 6px;
+          padding: 12px; text-align: center;
+      }
+      .metric-card.red { background: #fef2f2; border-color: #fecaca; }
+      .metric-card.orange { background: #fff7ed; border-color: #fed7aa; }
+      .metric-card.yellow { background: #fffbeb; border-color: #fef3c7; }
+      .metric-card.slate { background: #f9fafb; border-color: #e5e7eb; }
+      .metric-value { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
+      .metric-label { font-size: 11px; text-transform: uppercase; color: #6b7280; }
+
+      /* ===== TIMELINE ===== */
+      .timeline { border-left: 2px solid #e5e7eb; margin-left: 10px; padding-left: 15px; }
+      .timeline-item { position: relative; margin-bottom: 12px; }
+      .timeline-item::before {
+          content: ""; position: absolute; left: -16px; top: 4px;
+          width: 8px; height: 8px; border-radius: 50%; background: #6b7280;
+      }
+      .timeline-header {
+          display: flex; justify-content: space-between; align-items: center;
+          font-size: 12px; margin-bottom: 3px; font-weight: 600;
+      }
+      .timeline-body { font-size: 11px; color: #6b7280; }
+
+      /* ===== PHASE CARDS ===== */
+      .phase-card {
+          background: #ecfdf3; border: 1px solid #d1fae5; border-radius: 6px;
+          padding: 12px; text-align: center;
+      }
+      .phase-number { font-size: 28px; font-weight: 900; color: #667eea; margin-bottom: 6px; }
+      .phase-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+      .phase-timeline { font-size: 11px; color: #2563eb; font-weight: 600; margin-bottom: 4px; }
+      .phase-body { font-size: 11px; color: #6b7280; }
+
+      /* ===== PRIORITY CARDS ===== */
+      .priority-card {
+          background: white; border: 1px solid #e5e7eb; border-radius: 6px;
+          padding: 12px; margin-bottom: 10px;
+      }
+      .priority-header {
+          display: flex; justify-content: space-between; align-items: center;
+          margin-bottom: 8px;
+      }
+      .priority-tags { display: flex; gap: 4px; }
+
+      /* ===== LISTS ===== */
+      ul, ol { margin-left: 18px; margin-bottom: 10px; }
+      li { margin-bottom: 6px; color: #4b5563; font-size: 12px; }
+
+      /* ===== FOOTER ===== */
+      .footer {
+          margin-top: 30px; padding-top: 15px; border-top: 1px solid #e5e7eb;
+          text-align: center; font-size: 11px; color: #6b7280;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ============ COVER PAGE ============ -->
+    <div class="cover-page">
+      <div class="cover-title">{{ idea_title }}</div>
+      <div class="cover-subtitle">Comprehensive Infographic Report</div>
+
+      <div class="score-display">{{ overall_score }}%</div>
+      <div class="score-label">OVERALL VIABILITY SCORE</div>
+
+      <div class="cover-meta">
+        <div>Generated: {{ generated_date }}</div>
+        <div>Pragati Innovation Platform</div>
+      </div>
+    </div>
+
+    <div class="page-break"></div>
+
+    <!-- ============ SECTION 1: BUSINESS CASE ============ -->
+    <div class="section">
+      <span class="badge">Business Case</span>
+      <h1>{{ bc_title or 'Business Case Analysis' }}</h1>
+    </div>
+
+    {% if bc_executive_summary %}
+    <div class="section">
+      <div class="card card-primary">
+        <h3>Executive Summary</h3>
+        <p>{{ bc_executive_summary }}</p>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- The Big Idea -->
+    {% if bc_big_idea %}
+    <div class="section">
+      <h2>💡 The Big Idea</h2>
+      <div class="grid-3">
+        {% if bc_big_idea.problem %}
+        <div class="card">
+          <h4>The Problem</h4>
+          <p class="text-small">{{ bc_big_idea.problem }}</p>
+        </div>
+        {% endif %} {% if bc_big_idea.solution %}
+        <div class="card">
+          <h4>The Solution</h4>
+          <p class="text-small">
+            {{ bc_big_idea.solution.overview or bc_big_idea.solution }}
+          </p>
+          {% if bc_big_idea.solution.keyFeatures %}
+          <div class="chips">
+            {% for feature in bc_big_idea.solution.keyFeatures[:5] %}
+            <span class="chip">{{ feature }}</span>
+            {% endfor %}
+          </div>
+          {% endif %}
+        </div>
+        {% endif %} {% if bc_big_idea.mission %}
+        <div class="card">
+          <h4>Mission</h4>
+          <p class="text-small">{{ bc_big_idea.mission }}</p>
+        </div>
+        {% endif %}
+      </div>
+
+      {% if bc_big_idea.valueProposition %}
+      <div class="muted-box">
+        <span class="bold">Unique Value Proposition:</span> {{
+        bc_big_idea.valueProposition }}
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- The Customer & Market -->
+    {% if bc_customer %}
+    <div class="section">
+      <h2>👥 The Customer & Market</h2>
+      <div class="grid-2">
+        <div>
+          <h4>Target Audience</h4>
+          {% if bc_customer.targetAudience %} {% for segment in
+          bc_customer.targetAudience %}
+          <div class="pill-card">
+            <div class="pill-title">{{ segment.segment or segment }}</div>
+            {% if segment.description %}
+            <div class="pill-desc">{{ segment.description }}</div>
+            {% endif %}
+          </div>
+          {% endfor %} {% endif %} {% if bc_customer.targetMarket %} {% for
+          segment in bc_customer.targetMarket %}
+          <div class="pill-card">
+            <div class="pill-title">{{ segment.segment or segment }}</div>
+            {% if segment.description %}
+            <div class="pill-desc">{{ segment.description }}</div>
+            {% endif %}
+          </div>
+          {% endfor %} {% endif %}
+        </div>
+
+        <div>
+          {% if bc_customer.marketSize %}
+          <div class="info-box indigo">
+            <h4>Market Size</h4>
+            <p class="text-small">{{ bc_customer.marketSize }}</p>
+          </div>
+          {% endif %} {% if bc_customer.marketStrategy %}
+          <div class="info-box">
+            <h4>Go-to-Market Strategy</h4>
+            <p class="text-small">{{ bc_customer.marketStrategy }}</p>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- The Magic & Competition -->
+    {% if bc_magic %}
+    <div class="section">
+      <h2>🔧 The Magic & Competition</h2>
+      <div class="grid-2">
+        <div>
+          {% if bc_magic.coreTechnology %}
+          <div class="muted-box">
+            <span class="bold">Core Technology:</span><br />
+            {{ bc_magic.coreTechnology }}
+          </div>
+          {% endif %} {% if bc_magic.technicalApproach and
+          bc_magic.technicalApproach.architecture %}
+          <div class="muted-box" style="margin-top: 10px">
+            <span class="bold">Architecture:</span><br />
+            {{ bc_magic.technicalApproach.architecture }}
+          </div>
+          {% endif %}
+        </div>
+
+        <div>
+          {% if bc_magic.competitiveAdvantage %}
+          <div class="info-box">
+            <span class="bold">Competitive Edge:</span><br />
+            {{ bc_magic.competitiveAdvantage }}
+          </div>
+          {% endif %} {% if bc_magic.comparison and
+          bc_magic.comparison.whyItMatters %}
+          <div class="info-box amber">
+            <span class="bold">Why It Matters:</span><br />
+            {{ bc_magic.comparison.whyItMatters }}
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Business Model -->
+    {% if bc_business_model %}
+    <div class="section">
+      <h2>💼 Business Model</h2>
+      <div class="grid-2">
+        {% if bc_business_model.revenueModel %}
+        <div class="card">
+          <h4>Revenue Model</h4>
+          <p class="text-small">{{ bc_business_model.revenueModel }}</p>
+        </div>
+        {% endif %} {% if bc_business_model.unitEconomics %}
+        <div class="card">
+          <h4>Unit Economics</h4>
+          <p class="text-small">{{ bc_business_model.unitEconomics }}</p>
+        </div>
+        {% endif %}
+      </div>
+
+      {% if bc_business_model.revenueStreams %}
+      <h4>Revenue Streams</h4>
+      <div class="grid-3">
+        {% for stream in bc_business_model.revenueStreams %}
+        <div class="pill-card">
+          <div class="pill-title">{{ stream.stream or stream }}</div>
+          {% if stream.description %}
+          <div class="pill-desc">{{ stream.description }}</div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Path Forward -->
+    {% if bc_path_forward %}
+    <div class="section">
+      <h2>🗺️ The Path Forward</h2>
+
+      {% if bc_path_forward.roadmap %}
+      <div class="timeline">
+        {% for step in bc_path_forward.roadmap %}
+        <div class="timeline-item">
+          <div class="timeline-header">
+            <span>{{ step.step }}</span>
+            <span class="badge">{{ step.timeline }}</span>
+          </div>
+          <div class="timeline-body">{{ step.description }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %} {% if bc_path_forward.scalingStrategy %}
+      <div class="muted-box">
+        <span class="bold">Scaling Strategy:</span> {{
+        bc_path_forward.scalingStrategy }}
+      </div>
+      {% endif %}
+    </div>
+    {% endif %} {% if bc_conclusion %}
+    <div class="section">
+      <div class="card card-primary">
+        <h3>Conclusion</h3>
+        <p>{{ bc_conclusion }}</p>
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="page-break"></div>
+
+    <!-- ============ SECTION 2: RISK ASSESSMENT ============ -->
+    <div class="section">
+      <span class="badge badge-danger">Risk Assessment</span>
+      <h1>{{ ra_title or 'Risk Assessment Report' }}</h1>
+    </div>
+
+    <!-- Hero Grid -->
+    <div class="grid-3" style="margin-bottom: 20px">
+      {% if ra_overall_profile %}
+      <div class="card card-info" style="text-align: center">
+        <h4>Overall Risk Level</h4>
+        <div
+          class="pill severity {{ ra_overall_profile.level|lower }}"
+          style="font-size: 16px; padding: 6px 15px; margin: 10px 0"
+        >
+          {{ ra_overall_profile.level or 'MEDIUM' }}
+        </div>
+        {% if ra_overall_profile.explanation %}
+        <p class="text-small">{{ ra_overall_profile.explanation }}</p>
+        {% endif %}
+      </div>
+      {% endif %} {% if ra_executive_summary %}
+      <div class="card" style="grid-column: span 2">
+        <h3>Executive Summary</h3>
+        <p>{{ ra_executive_summary }}</p>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Risk Breakdown -->
+    {% if ra_matrix %}
+    <div class="section">
+      <h2>Risk Breakdown</h2>
+      <div class="grid-4">
+        <div class="metric-card red">
+          <div class="metric-value">
+            {{ ra_matrix.criticalRisks|length or 0 }}
+          </div>
+          <div class="metric-label">Critical Risks</div>
+        </div>
+        <div class="metric-card orange">
+          <div class="metric-value">{{ ra_matrix.highRisks|length or 0 }}</div>
+          <div class="metric-label">High Risks</div>
+        </div>
+        <div class="metric-card yellow">
+          <div class="metric-value">
+            {{ ra_matrix.mediumRisks|length or 0 }}
+          </div>
+          <div class="metric-label">Medium Risks</div>
+        </div>
+        <div class="metric-card slate">
+          <div class="metric-value">{{ ra_matrix.lowRisks|length or '—' }}</div>
+          <div class="metric-label">Low Risks</div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Detailed Risk Categories -->
+    {% if ra_categories %}
+    <div class="section">
+      <h2>Detailed Assessment</h2>
+
+      {% if ra_categories.businessModelFinancial %}
+      <h3>💰 Business & Financial Risks</h3>
+      {% for risk in ra_categories.businessModelFinancial %}
+      <div class="risk-card {{ risk.severity|lower }}">
+        <div class="risk-header">
+          <div class="risk-name">{{ risk.name }}</div>
+          <div class="risk-badges">
+            <span class="pill severity {{ risk.severity|lower }}"
+              >{{ risk.severity }}</span
+            >
+            <span class="pill">Prob: {{ risk.likelihood }}%</span>
+            <span class="pill">Imp: {{ risk.impact }}%</span>
+          </div>
+        </div>
+        <p class="risk-desc">{{ risk.description }}</p>
+        {% if risk.mitigation %}
+        <div class="grid-2" style="margin-top: 8px">
+          <div class="muted-box">
+            <span class="bold">Mitigation:</span> {{ risk.mitigation }}
+          </div>
+          {% if risk.contingencyPlan %}
+          <div class="muted-box">
+            <span class="bold">Contingency:</span> {{ risk.contingencyPlan }}
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %} {% endif %} {% if ra_categories.technicalOperational %}
+      <h3>⚙️ Technical & Operational Risks</h3>
+      {% for risk in ra_categories.technicalOperational %}
+      <div class="risk-card {{ risk.severity|lower }}">
+        <div class="risk-header">
+          <div class="risk-name">{{ risk.name }}</div>
+          <div class="risk-badges">
+            <span class="pill severity {{ risk.severity|lower }}"
+              >{{ risk.severity }}</span
+            >
+            <span class="pill">Prob: {{ risk.likelihood }}%</span>
+            <span class="pill">Imp: {{ risk.impact }}%</span>
+          </div>
+        </div>
+        <p class="risk-desc">{{ risk.description }}</p>
+        {% if risk.mitigation %}
+        <div class="muted-box" style="margin-top: 6px">
+          <span class="bold">Mitigation:</span> {{ risk.mitigation }}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %} {% endif %} {% if ra_categories.marketCommercial %}
+      <h3>📈 Market & Commercial Risks</h3>
+      {% for risk in ra_categories.marketCommercial %}
+      <div class="risk-card {{ risk.severity|lower }}">
+        <div class="risk-header">
+          <div class="risk-name">{{ risk.name }}</div>
+          <div class="risk-badges">
+            <span class="pill severity {{ risk.severity|lower }}"
+              >{{ risk.severity }}</span
+            >
+            <span class="pill">Prob: {{ risk.likelihood }}%</span>
+            <span class="pill">Imp: {{ risk.impact }}%</span>
+          </div>
+        </div>
+        <p class="risk-desc">{{ risk.description }}</p>
+        {% if risk.mitigation %}
+        <div class="muted-box" style="margin-top: 6px">
+          <span class="bold">Mitigation:</span> {{ risk.mitigation }}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %} {% endif %} {% if ra_categories.complianceRegulatory %}
+      <h3>⚖️ Compliance & Regulatory Risks</h3>
+      {% for risk in ra_categories.complianceRegulatory %}
+      <div class="risk-card {{ risk.severity|lower }}">
+        <div class="risk-header">
+          <div class="risk-name">{{ risk.name }}</div>
+          <div class="risk-badges">
+            <span class="pill severity {{ risk.severity|lower }}"
+              >{{ risk.severity }}</span
+            >
+            <span class="pill">Prob: {{ risk.likelihood }}%</span>
+            <span class="pill">Imp: {{ risk.impact }}%</span>
+          </div>
+        </div>
+        <p class="risk-desc">{{ risk.description }}</p>
+        {% if risk.mitigation %}
+        <div class="muted-box" style="margin-top: 6px">
+          <span class="bold">Mitigation:</span> {{ risk.mitigation }}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %} {% endif %} {% if ra_categories.teamOrganizational %}
+      <h3>👥 Team & Organizational Risks</h3>
+      {% for risk in ra_categories.teamOrganizational %}
+      <div class="risk-card {{ risk.severity|lower }}">
+        <div class="risk-header">
+          <div class="risk-name">{{ risk.name }}</div>
+          <div class="risk-badges">
+            <span class="pill severity {{ risk.severity|lower }}"
+              >{{ risk.severity }}</span
+            >
+            <span class="pill">Prob: {{ risk.likelihood }}%</span>
+            <span class="pill">Imp: {{ risk.impact }}%</span>
+          </div>
+        </div>
+        <p class="risk-desc">{{ risk.description }}</p>
+        {% if risk.mitigation %}
+        <div class="muted-box" style="margin-top: 6px">
+          <span class="bold">Mitigation:</span> {{ risk.mitigation }}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %} {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Prioritized Mitigation -->
+    {% if ra_prioritized_mitigation %}
+    <div class="section">
+      <h2>🎯 Prioritized Mitigation Plan</h2>
+      {% for item in ra_prioritized_mitigation %}
+      <div class="priority-card">
+        <div class="priority-header">
+          <span class="bold">{{ item.area }}</span>
+          <div class="priority-tags">
+            <span class="pill" style="background: #374151; color: white"
+              >Priority {{ item.priority }}</span
+            >
+            {% if item.timeline %}
+            <span class="badge">{{ item.timeline }}</span>
+            {% endif %}
+          </div>
+        </div>
+        <div class="grid-2">
+          {% if item.rationale %}
+          <div class="muted-box">
+            <span class="bold">Rationale:</span> {{ item.rationale }}
+          </div>
+          {% endif %} {% if item.actions %}
+          <div class="info-box success">
+            <span class="bold">Actions:</span>
+            <ul style="margin-top: 4px">
+              {% for action in item.actions %}
+              <li>{{ action }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %} {% if ra_conclusion %}
+    <div class="section">
+      <div class="card card-warning">
+        <h3>Conclusion</h3>
+        <p>{{ ra_conclusion }}</p>
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="page-break"></div>
+
+    <!-- ============ SECTION 3: STRATEGIC GROWTH ============ -->
+    <div class="section">
+      <span class="badge badge-success">Strategic Growth</span>
+      <h1>{{ sg_title or 'Strategic Growth & Viability' }}</h1>
+    </div>
+
+    {% if sg_executive_summary %}
+    <div class="section">
+      <div class="card card-success">
+        <h3>Executive Summary</h3>
+        <p>{{ sg_executive_summary }}</p>
+      </div>
+    </div>
+    {% endif %} {% if sg_vision %}
+    <div class="section">
+      <div class="info-box success">
+        <h3>Vision</h3>
+        <p>{{ sg_vision }}</p>
+      </div>
+    </div>
+    {% endif %} {% if sg_current_phase or sg_current_trl %}
+    <div class="section">
+      <div class="info-box">
+        <h3>Current Status</h3>
+        <p>
+          <span class="bold">Phase:</span> {{ sg_current_phase or '—' }} |
+          <span class="bold">TRL Level:</span> {{ sg_current_trl or '—' }}
+        </p>
+      </div>
+    </div>
+    {% endif %} {% if sg_phases %}
+    <div class="section">
+      <h2>📋 TRL Progression Roadmap</h2>
+      <div class="grid-3">
+        {% for phase in sg_phases[:3] %}
+        <div class="phase-card">
+          <div class="phase-number">{{ loop.index }}</div>
+          <div class="phase-title">
+            {{ phase.phaseName or 'Phase ' ~ loop.index }}
+          </div>
+          <div class="phase-timeline">{{ phase.timeline }}</div>
+          <div class="phase-body">{{ phase.objectives[:120] }}...</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Footer -->
+    <div class="footer">
+      <p>
+        <strong>Pragati Innovation Platform</strong> | Comprehensive Infographic
+        Report © 2025
+      </p>
+      <p style="margin-top: 8px">
+        This report is confidential and intended for authorized stakeholders
+        only.
+      </p>
+    </div>
+  </body>
+</html>

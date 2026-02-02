@@ -378,11 +378,11 @@ def submit_idea():
     Submit idea for AI validation.
     Requirements:
         1. Psychometric analysis completed
-        2. Mentor approved
+        2. Mentor approved (SKIP for individual_innovator)
         3. PPT uploaded
         4. Required fields filled
         5. Team approval NOT required (optional)
-        6. **NEW: User must have at least 1 credit**
+        6. User must have at least 1 credit
     """
     print("="*80)
     print("submit_idea: Starting submission process")
@@ -447,6 +447,12 @@ def submit_idea():
     if not innovator:
         return jsonify({"error": "User profile not found"}), 404
 
+    # ✅ GET USER ROLE
+    user_role = innovator.get('role', 'innovator')
+    is_individual_innovator = user_role == 'individual_innovator'
+    print(f"👤 User role: {user_role}")
+    print(f"   Is individual innovator: {is_individual_innovator}")
+
     # ==================== CREDIT VALIDATION ====================
     user_credits = innovator.get('creditQuota', 0)
     print(f"💰 User credits: {user_credits}")
@@ -484,36 +490,39 @@ def submit_idea():
             "message": "This draft has already been submitted."
         }), 409
 
-    # VALIDATION 3 - MENTOR APPROVED (MANDATORY)
-    mentor_status = draft.get('mentorRequestStatus', 'none')
-    print(f"👨🏫 Mentor status check:")
-    print(f"   - mentorRequestStatus: {mentor_status}")
-    print(f"   - mentorId: {draft.get('mentorId')}")
-    print(f"   - mentorName: {draft.get('mentorName')}")
-    
-    if mentor_status == 'pending':
-        print(f"⏳ Mentor approval pending")
-        return jsonify({
-            "error": "Mentor approval pending",
-            "message": "Please wait for your mentor to approve your request."
-        }), 403
-    
-    if mentor_status == 'rejected':
-        print(f"❌ Mentor rejected request")
-        return jsonify({
-            "error": "Mentor rejected your request",
-            "message": "Please select a different mentor and request approval."
-        }), 403
-    
-    if mentor_status != 'accepted':
-        print(f"❌ Mentor not approved. Current status: {mentor_status}")
-        return jsonify({
-            "error": "Mentor approval required",
-            "message": "Please request a mentor and get approval before submitting.",
-            "currentStatus": mentor_status
-        }), 403
-    
-    print(f"✅ Mentor approved: {draft.get('mentorName')}")
+    # VALIDATION 3 - MENTOR APPROVED (SKIP for individual_innovator)
+    if not is_individual_innovator:
+        mentor_status = draft.get('mentorRequestStatus', 'none')
+        print(f"👨🏫 Mentor status check:")
+        print(f"   - mentorRequestStatus: {mentor_status}")
+        print(f"   - mentorId: {draft.get('mentorId')}")
+        print(f"   - mentorName: {draft.get('mentorName')}")
+        
+        if mentor_status == 'pending':
+            print(f"⏳ Mentor approval pending")
+            return jsonify({
+                "error": "Mentor approval pending",
+                "message": "Please wait for your mentor to approve your request."
+            }), 403
+        
+        if mentor_status == 'rejected':
+            print(f"❌ Mentor rejected request")
+            return jsonify({
+                "error": "Mentor rejected your request",
+                "message": "Please select a different mentor and request approval."
+            }), 403
+        
+        if mentor_status != 'accepted':
+            print(f"❌ Mentor not approved. Current status: {mentor_status}")
+            return jsonify({
+                "error": "Mentor approval required",
+                "message": "Please request a mentor and get approval before submitting.",
+                "currentStatus": mentor_status
+            }), 403
+        
+        print(f"✅ Mentor approved: {draft.get('mentorName')}")
+    else:
+        print(f"⏭️  Mentor validation skipped (individual innovator)")
 
     # VALIDATION 4 - PPT UPLOADED
     if not draft.get('pptFileName') or not draft.get('pptFileKey'):
@@ -554,6 +563,23 @@ def submit_idea():
     idea_id = ObjectId()
     now = datetime.now(timezone.utc)
     
+    # ✅ Build mentor fields based on role
+    mentor_fields = {}
+    if not is_individual_innovator:
+        mentor_fields = {
+            "mentorId": draft.get('mentorId'),
+            "mentorName": draft.get('mentorName'),
+            "mentorEmail": draft.get('mentorEmail'),
+            "mentorRequestStatus": "accepted",
+        }
+    else:
+        mentor_fields = {
+            "mentorId": None,
+            "mentorName": None,
+            "mentorEmail": None,
+            "mentorRequestStatus": "not_required",
+        }
+    
     idea_doc = {
         "_id": idea_id,
         "title": draft.get('title'),
@@ -569,12 +595,10 @@ def submit_idea():
         "innovatorId": uid,
         "innovatorName": innovator_name,
         "innovatorEmail": innovator_email,
+        "innovatorRole": user_role,  # ✅ Track role
         
-        # Mentor info (from approved mentor)
-        "mentorId": draft.get('mentorId'),
-        "mentorName": draft.get('mentorName'),
-        "mentorEmail": draft.get('mentorEmail'),
-        "mentorRequestStatus": "accepted",
+        # Mentor info (conditional based on role)
+        **mentor_fields,  # ✅ Use dynamic mentor fields
         
         # Team info
         "coreTeamIds": accepted_team_ids,
@@ -693,20 +717,21 @@ def submit_idea():
         except Exception as e:
             print(f"   ⚠️ Failed to notify College Admin: {e}")
     
-    # 3. Notify Mentor
-    mentor_id = draft.get('mentorId')
-    if mentor_id:
-        try:
-            NotificationService.create_notification(
-                str(mentor_id),
-                'IDEA_SUBMITTED',
-                {**base_data, 'mentorName': draft.get('mentorName', 'Mentor')},
-                role='mentor'
-            )
-            notification_count += 1
-            print(f"   ✅ Mentor notified")
-        except Exception as e:
-            print(f"   ⚠️ Failed to notify Mentor: {e}")
+    # 3. Notify Mentor (only if not individual innovator)
+    if not is_individual_innovator:
+        mentor_id = draft.get('mentorId')
+        if mentor_id:
+            try:
+                NotificationService.create_notification(
+                    str(mentor_id),
+                    'IDEA_SUBMITTED',
+                    {**base_data, 'mentorName': draft.get('mentorName', 'Mentor')},
+                    role='mentor'
+                )
+                notification_count += 1
+                print(f"   ✅ Mentor notified")
+            except Exception as e:
+                print(f"   ⚠️ Failed to notify Mentor: {e}")
     
     # 4. Notify Team Members
     for team_member_id in accepted_team_ids:
@@ -748,9 +773,9 @@ def submit_idea():
 
 
 @ideas_bp.route("/draft/upload", methods=["POST"])
-@requires_role(["innovator","individual_innovator"])
+@requires_role(["innovator", "individual_innovator"])
 def upload_draft_ppt():
-    """Upload PPT file for a draft - preserves session key"""
+    """Upload PPT/PDF file for a draft - preserves session key"""
     uid = request.user_id
     draft_id_str = request.form.get("draftId")
     session_key = request.form.get("sessionKey")
@@ -769,9 +794,10 @@ def upload_draft_ppt():
     if '.' not in filename:
         return jsonify({"error": "Invalid filename"}), 400
 
+    # ✅ UPDATED: Accept PPT, PPTX, and PDF
     ext = filename.rsplit(".", 1)[-1].lower()
-    if ext not in {"ppt", "pptx"}:
-        return jsonify({"error": "Only .ppt or .pptx files allowed"}), 400
+    if ext not in {"ppt", "pptx", "pdf"}:
+        return jsonify({"error": "Only .ppt, .pptx, or .pdf files allowed"}), 400
 
     # Check file size
     file.seek(0, os.SEEK_END)
@@ -813,6 +839,14 @@ def upload_draft_ppt():
     file_uuid = str(uuid.uuid4())
     key = f"drafts/{uid}/{file_uuid}.{ext}"
 
+    # ✅ UPDATED: Get correct content type for each file format
+    content_type_map = {
+        'ppt': 'application/vnd.ms-powerpoint',
+        'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'pdf': 'application/pdf'
+    }
+    content_type = content_type_map.get(ext, 'application/octet-stream')
+
     try:
         # Upload to S3
         s3.upload_fileobj(
@@ -820,7 +854,7 @@ def upload_draft_ppt():
             BUCKET,
             key,
             ExtraArgs={
-                'ContentType': mimetypes.types_map.get(f'.{ext}', 'application/vnd.ms-powerpoint'),
+                'ContentType': content_type,  # ✅ Use correct content type
                 'ACL': 'private'
             }
         )
@@ -830,6 +864,8 @@ def upload_draft_ppt():
         upload_time = datetime.now(timezone.utc)
 
         print(f"✅ Uploaded to S3: {key}")
+        print(f"✅ File type: {ext.upper()}")
+        print(f"✅ Content-Type: {content_type}")
         print(f"✅ S3 URL: {s3_url}")
         print(f"✅ File size: {file_size} bytes")
 
@@ -839,6 +875,7 @@ def upload_draft_ppt():
             "pptFileName": filename,
             "pptFileUrl": s3_url,
             "pptFileSize": file_size,
+            "pptFileType": ext,  # ✅ NEW: Store file type
             "pptUploadedAt": upload_time,
             "updatedAt": datetime.now(timezone.utc),
             "lastSavedAt": datetime.now(timezone.utc)
@@ -861,7 +898,7 @@ def upload_draft_ppt():
             print(f"✅ Draft updated. Modified: {result.modified_count}")
             out_draft_id = str(draft_oid)
         else:
-            # Create new draft with just the PPT
+            # Create new draft with just the file
             draft_doc = {
                 "_id": ObjectId(),
                 "ownerId": uid,
@@ -877,23 +914,25 @@ def upload_draft_ppt():
             
             result = drafts_coll.insert_one(draft_doc)
             out_draft_id = str(result.inserted_id)
-            print(f"✅ Created new draft with PPT: {out_draft_id}")
+            print(f"✅ Created new draft with file: {out_draft_id}")
 
         # ✅ Verify the data was saved
         saved_draft = drafts_coll.find_one({"_id": ObjectId(out_draft_id)})
         print(f"✅ Verification - pptFileUrl in DB: {saved_draft.get('pptFileUrl')}")
         print(f"✅ Verification - pptFileSize in DB: {saved_draft.get('pptFileSize')}")
+        print(f"✅ Verification - pptFileType in DB: {saved_draft.get('pptFileType')}")
         print(f"✅ Verification - pptUploadedAt in DB: {saved_draft.get('pptUploadedAt')}")
 
         return jsonify({
             "success": True,
-            "message": "PPT uploaded successfully",
+            "message": f"{ext.upper()} uploaded successfully",  # ✅ Dynamic message
             "data": {
                 "draftId": out_draft_id,
                 "pptFileKey": key,
                 "pptFileName": filename,
                 "pptFileUrl": s3_url,
                 "pptFileSize": file_size,
+                "pptFileType": ext,  # ✅ Return file type
                 "pptUploadedAt": upload_time.isoformat()
             }
         }), 200
@@ -1122,6 +1161,10 @@ def get_ideas_by_user(user_id):
     ideas = []
 
     # Enrich with user data
+
+
+
+    # Enrich with user data
     for idea_doc in cursor:
         idea = clean_doc(idea_doc)
         
@@ -1135,6 +1178,40 @@ def get_ideas_by_user(user_id):
             idea['isOwner'] = ids_match(idea.get('innovatorId'), caller_id)
         else:
             idea['isOwner'] = True  # For admins, not relevant
+
+        # ✅ NEW: Add consultation details
+        if idea.get('consultationMentorId'):
+            try:
+                mentor_id = idea.get('consultationMentorId')
+                mentor = find_user(mentor_id)
+                
+                if mentor:
+                    # Determine status (map 'assigned' to 'Scheduled' for frontend consistency if needed, 
+                    # or keep as is. Requirement says: "Scheduled", "Pending", "Completed", "Cancelled", "Assigned")
+                    # We will use the stored status, defaulting to "Scheduled" if assigned but no status
+                    status = idea.get('consultationStatus', 'Scheduled')
+                    if status == 'assigned': status = 'Scheduled'
+                    
+                    idea['consultation'] = {
+                        "status": status,
+                        "scheduledAt": idea.get('consultationScheduledAt').isoformat() if idea.get('consultationScheduledAt') else None,
+                        "mentor": {
+                            "name": mentor.get('name'),
+                            "email": mentor.get('email'),
+                            "organization": mentor.get('organization', 'External')
+                        },
+                        "meetingLink": idea.get('consultationMeetingLink') or idea.get('meetingLink'),
+                        "name": mentor.get('name'), # flattened for convenience if requested
+                        "email": mentor.get('email'),
+                        "organization": mentor.get('organization', 'External')
+                    }
+                else:
+                     idea['consultation'] = None
+            except Exception as e:
+                print(f"⚠️ Error fetching consultation details: {e}")
+                idea['consultation'] = None
+        else:
+            idea['consultation'] = None
 
         if idea.get('pptFileKey'):
             idea['pptFileUrl'] = get_signed_url(idea['pptFileKey'])

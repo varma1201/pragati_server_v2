@@ -17,6 +17,7 @@ def register_blueprints(app):
     from app.routes.audit import audit_bp
     from app.routes.dashboard import dashboard_bp
     from app.routes.plans import plans_bp
+    from app.routes.payment_routes import payment_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
@@ -36,3 +37,4 @@ def register_blueprints(app):
     app.register_blueprint(audit_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(plans_bp)
+    app.register_blueprint(payment_bp)

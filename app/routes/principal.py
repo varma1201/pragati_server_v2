@@ -760,3 +760,110 @@ def delete_internal_mentor_principal(mentor_id):
         "success": True,
         "message": "Mentor deleted successfully"
     }), 200
+
+
+@principal_bp.route('/mentors/<mentor_id>/assignments', methods=['GET'])
+@requires_role(['college_admin', 'principal'])
+def get_mentor_assignments(mentor_id):
+    """
+    Get mentor details, assigned ideas, and associated innovators.
+    """
+    caller_id = request.user_id
+    
+    # 1. Validate Mentor ID
+    if isinstance(mentor_id, str):
+        try:
+            mentor_id_oid = ObjectId(mentor_id)
+        except:
+             return jsonify({"error": "Invalid mentor ID format"}), 400
+    else:
+        mentor_id_oid = mentor_id
+        mentor_id = str(mentor_id)
+
+    # 2. Fetch Mentor & Verify Access
+    # (Ensure mentor belongs to this college/principal)
+    ttc_ids = list(users_coll.find(
+        {"collegeId": caller_id, "role": "ttc_coordinator", "isDeleted": {"$ne": True}},
+        {"_id": 1}
+    ))
+    ttc_id_list = [ttc["_id"] for ttc in ttc_ids]
+
+    mentor = users_coll.find_one({
+        "_id": mentor_id_oid,
+        "role": "internal_mentor", # Explicitly internal mentors
+        "isDeleted": {"$ne": True},
+        "$or": [
+            {"createdBy": caller_id},
+            {"createdBy": {"$in": ttc_id_list}},
+            {"collegeId": caller_id} # Fallback: direct college link
+        ]
+    })
+
+    if not mentor:
+         # Try finding by collegeId directly in case createdBy logic is fuzzy
+         mentor = users_coll.find_one({
+            "_id": mentor_id_oid,
+            "role": "internal_mentor",
+            "collegeId": caller_id,
+            "isDeleted": {"$ne": True}
+         })
+
+    if not mentor:
+        return jsonify({"error": "Mentor not found or access denied"}), 404
+
+    # 3. Fetch Assigned Ideas
+    # Ideas where mentorId matches (check string and ObjectId)
+    ideas = list(ideas_coll.find({
+        "$or": [
+            {"mentorId": mentor_id},
+            {"mentorId": mentor_id_oid}
+        ],
+        "isDeleted": False
+    }))
+
+    # 4. Collect Innovators
+    innovator_ids = set()
+    assignments_list = []
+    
+    for idea in ideas:
+        inv_id = idea.get("innovatorId")
+        if inv_id:
+            innovator_ids.add(str(inv_id))
+        
+        assignments_list.append({
+            "ideaId": str(idea["_id"]),
+            "title": idea.get("title", "Untitled"),
+            "status": idea.get("status", "draft"),
+            "submittedAt": idea.get("submittedAt"),
+            "innovatorId": str(inv_id) if inv_id else None
+        })
+
+    # 5. Fetch Innovator Details
+    innovator_oids = [ObjectId(iid) for iid in innovator_ids if ObjectId.is_valid(iid)]
+    innovators = list(users_coll.find(
+        {"_id": {"$in": innovator_oids}},
+        {"name": 1, "email": 1, "phone": 1}
+    ))
+
+    innovators_list = []
+    for inv in innovators:
+        innovators_list.append({
+            "id": str(inv["_id"]),
+            "name": inv.get("name"),
+            "email": inv.get("email"),
+            "phone": inv.get("phone")
+        })
+
+    # Response Structure
+    return jsonify({
+        "success": True,
+        "data": {
+            "mentor": {
+                "id": str(mentor["_id"]),
+                "name": mentor.get("name"),
+                "email": mentor.get("email")
+            },
+            "assignments": assignments_list,
+            "innovators": innovators_list
+        }
+    }), 200

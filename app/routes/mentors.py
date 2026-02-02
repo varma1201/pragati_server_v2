@@ -11,6 +11,8 @@ import secrets
 from bson import ObjectId
 from app.utils.validators import normalize_user_id, normalize_any_id_field, clean_doc, get_user_by_any_id
 from app.utils.id_helpers import find_user, ids_match
+from app.services.audit_service import AuditService
+
 
 mentors_bp = Blueprint('mentors', __name__, url_prefix='/api/mentors')
 
@@ -245,8 +247,15 @@ def accept_mentor_request(request_id):
     if caller_id != mentor_request['mentorId']:
         return jsonify({"error": "Access denied"}), 403
     
+    # ✅ Extract IDs for later use
+    mentor_id = mentor_request['mentorId']
+    innovator_id = mentor_request['innovatorId']
+    
     # Get draft details
     draft = drafts_coll.find_one({"_id": mentor_request['draftId']})
+    
+    # ✅ Get innovator details for audit log
+    innovator = users_coll.find_one({"_id": innovator_id})
     
     # Atomic update: mark request as accepted
     mentor_requests_coll.update_one(
@@ -262,7 +271,7 @@ def accept_mentor_request(request_id):
         {"_id": mentor_request['draftId']},
         {
             "$set": {
-                "mentorId": mentor_request['mentorId'],
+                "mentorId": mentor_id,  # ✅ Use extracted variable
                 "mentorRequestStatus": "accepted",
                 "mentorName": mentor_request['mentorName'],
                 "mentorApprovedAt": datetime.now(timezone.utc),
@@ -273,7 +282,7 @@ def accept_mentor_request(request_id):
     
     # Notify innovator
     NotificationService.create_notification(
-        mentor_request['innovatorId'],
+        innovator_id,  # ✅ Use extracted variable
         'MENTOR_REQUEST_ACCEPTED',
         {
             'mentorName': mentor_request['mentorName'],
@@ -281,13 +290,18 @@ def accept_mentor_request(request_id):
         }
     )
 
+    # ✅ FIXED: Audit log with correct variables
     AuditService.log_action(
-        actor_id=mentor_id,
-        action=f"Accepted mentor request from {innovator.get('name')}",
+        actor_id=mentor_id,  # ✅ Now defined
+        action=f"Accepted mentor request from {innovator.get('name', 'Unknown') if innovator else 'Unknown'}",
         category=AuditService.CATEGORY_CONSULTATION,
         target_id=request_id,
         target_type="mentor_request",
-        metadata={"innovatorId": innovator_id, "draftTitle": draft.get('title')}
+        metadata={
+            "innovatorId": str(innovator_id),
+            "draftTitle": draft.get('title', 'Untitled') if draft else 'Untitled',
+            "mentorName": mentor_request['mentorName']
+        }
     )
     
     # Send acceptance email
@@ -305,12 +319,12 @@ def accept_mentor_request(request_id):
         <html>
         <body style="font-family: Arial, sans-serif;">
             <h2>Great News! 🎉</h2>
-            <p>Dear {mentor_request['innovatorName']},</p>
+            <p>Dear {mentor_request.get('innovatorName', 'Innovator')},</p>
             
             <p><strong>{mentor_request['mentorName']}</strong> has accepted your mentorship request!</p>
             
             <div style="background: #d4edda; padding: 20px; border-radius: 8px; margin: 20px 0;">
-                <h3 style="margin-top: 0; color: #155724;">Idea: {mentor_request['draftTitle']}</h3>
+                <h3 style="margin-top: 0; color: #155724;">Idea: {mentor_request.get('draftTitle', 'Your Idea')}</h3>
                 <p><strong>Your Mentor:</strong> {mentor_request['mentorName']}</p>
             </div>
             
@@ -325,9 +339,15 @@ def accept_mentor_request(request_id):
         </html>
         """
         
-        email_service.send_email(mentor_request['innovatorEmail'], subject, html_body)
+        email_service.send_email(
+            mentor_request.get('innovatorEmail'), 
+            subject, 
+            html_body
+        )
     except Exception as e:
-        print(f"Email sending failed: {e}")
+        print(f"❌ Email sending failed: {e}")
+        import traceback
+        traceback.print_exc()
         # Don't fail the API call if email fails
     
     return jsonify({
@@ -377,6 +397,18 @@ def reject_mentor_request(request_id):
     if caller_id != mentor_id:
         return jsonify({"error": "Access denied"}), 403
     
+    # ✅ Extract innovator_id early
+    innovator_id = mentor_request.get('innovatorId')
+    if isinstance(innovator_id, str):
+        try:
+            innovator_id = ObjectId(innovator_id)
+        except:
+            pass  # Keep as string if conversion fails
+    
+    # ✅ Get innovator details for audit log
+    innovator = users_coll.find_one({"_id": innovator_id})
+    innovator_name = innovator.get('name', 'Unknown') if innovator else mentor_request.get('innovatorName', 'Unknown')
+    
     # Get draft details
     draft = drafts_coll.find_one({"_id": mentor_request['draftId']})
     draft_title = draft.get('title', 'Your Idea') if draft else 'Your Idea'
@@ -409,28 +441,41 @@ def reject_mentor_request(request_id):
         }
     )
 
-    AuditService.log_action(
-        actor_id=mentor_id,
-        action=f"Rejected mentor request from {innovator.get('name')}",
-        category=AuditService.CATEGORY_CONSULTATION,
-        target_id=request_id,
-        target_type="mentor_request",
-        metadata={"innovatorId": innovator_id, "reason": rejection_reason}
-    )
+    # ✅ FIXED: Audit log with correct variables
+    try:
+        AuditService.log_action(
+            actor_id=mentor_id,  # ✅ Already defined
+            action=f"Rejected mentor request from {innovator_name}",
+            category=AuditService.CATEGORY_CONSULTATION,
+            target_id=str(req_oid),  # ✅ Convert to string
+            target_type="mentor_request",
+            metadata={
+                "innovatorId": str(innovator_id),
+                "innovatorName": innovator_name,
+                "draftTitle": draft_title,
+                "reason": rejection_reason or "No reason provided"
+            }
+        )
+    except Exception as e:
+        print(f"⚠️ Audit log failed: {e}")
+        import traceback
+        traceback.print_exc()
     
     # Notify innovator
     try:
         NotificationService.create_notification(
-            str(mentor_request['innovatorId']),
+            str(innovator_id),  # ✅ Convert to string
             'MENTOR_REQUEST_REJECTED',
             {
-                'mentorName': mentor_request['mentorName'],
+                'mentorName': mentor_request.get('mentorName', 'Mentor'),
                 'ideaTitle': draft_title,
                 'reason': rejection_reason or 'No reason provided'
             }
         )
     except Exception as e:
         print(f"⚠️ Failed to send notification: {e}")
+        import traceback
+        traceback.print_exc()
     
     # Send rejection email
     try:
@@ -442,14 +487,29 @@ def reject_mentor_request(request_id):
         platform_url = current_app.config.get('PLATFORM_URL', 'http://localhost:3000')
         mentors_url = f"{platform_url}/dashboard/innovator/ideas/drafts"
         
-        subject = f"Mentor Request Update: {mentor_request['mentorName']} - {draft_title}"
+        # ✅ Safe get with defaults
+        mentor_name = mentor_request.get('mentorName', 'Mentor')
+        innovator_email = mentor_request.get('innovatorEmail')
+        
+        # ✅ Skip email if no email address
+        if not innovator_email:
+            print(f"⚠️ No innovator email found, skipping email")
+            return jsonify({
+                "success": True,
+                "message": "Mentor request rejected successfully"
+            }), 200
+        
+        subject = f"Mentor Request Update: {mentor_name} - {draft_title}"
         
         reason_html = ""
         if rejection_reason:
+            # ✅ Escape HTML to prevent XSS
+            from html import escape
+            safe_reason = escape(rejection_reason)
             reason_html = f"""
             <div style="background: #f8d7da; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #721c24;">
                 <p style="margin: 0; color: #721c24;"><strong>Reason:</strong></p>
-                <p style="margin: 10px 0 0 0; color: #721c24;">{rejection_reason}</p>
+                <p style="margin: 10px 0 0 0; color: #721c24;">{safe_reason}</p>
             </div>
             """
         
@@ -457,9 +517,9 @@ def reject_mentor_request(request_id):
         <html>
         <body style="font-family: Arial, sans-serif; color: #333;">
             <h2>Mentor Request Update</h2>
-            <p>Dear {mentor_request['innovatorName']},</p>
+            <p>Dear {mentor_request.get('innovatorName', 'Innovator')},</p>
             
-            <p><strong>{mentor_request['mentorName']}</strong> is unable to mentor your idea at this time.</p>
+            <p><strong>{mentor_name}</strong> is unable to mentor your idea at this time.</p>
             
             <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #856404;">
                 <h3 style="margin-top: 0; color: #856404;">Idea: {draft_title}</h3>
@@ -491,14 +551,16 @@ def reject_mentor_request(request_id):
         """
         
         email_service.send_email(
-            mentor_request['innovatorEmail'], 
+            innovator_email, 
             subject, 
             html_body
         )
-        print(f"✅ Rejection email sent to {mentor_request['innovatorEmail']}")
+        print(f"✅ Rejection email sent to {innovator_email}")
         
     except Exception as e:
         print(f"⚠️ Email sending failed: {e}")
+        import traceback
+        traceback.print_exc()
         # Don't fail the API call if email fails
     
     return jsonify({

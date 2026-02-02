@@ -3,7 +3,8 @@ from bson import ObjectId
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
-from app.database.mongo import users_coll, ideas_coll, results_coll
+from app.database.mongo import users_coll, ideas_coll, results_coll, audit_logs_coll, generated_reports_coll
+from app.services.audit_service import AuditService
 from app.middleware.auth import requires_auth, requires_role
 from app.utils.validators import clean_doc, normalize_user_id
 
@@ -73,6 +74,34 @@ def get_principal_stats():
         credits_available = max(0, credits_total - credits_used)
         
         print(f"💰 Credits: Total={credits_total}, Used={credits_used}, Available={credits_available}")
+
+        # =========================================================================
+        # 1.5 CREDITS USED THIS MONTH
+        # =========================================================================
+        now = datetime.now(timezone.utc)
+        start_of_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+        
+        pipeline = [
+            {
+                "$match": {
+                    "actorId": str(college_id),
+                    "category": AuditService.CATEGORY_CREDIT,
+                    "createdAt": {"$gte": start_of_month},
+                    "action": {"$regex": "^Approved"}
+                }
+            },
+            {
+                "$group": {
+                    "_id": None,
+                    "total": {"$sum": "$metadata.amount"}
+                }
+            }
+        ]
+        
+        usage_result = list(audit_logs_coll.aggregate(pipeline))
+        credits_used_this_month = usage_result[0]['total'] if usage_result else 0
+        
+        print(f"📅 Credits Used This Month: {credits_used_this_month}")
         
         # =========================================================================
         # 2. TTC COORDINATORS
@@ -127,15 +156,31 @@ def get_principal_stats():
         print(f"💡 Ideas: {idea_count}")
         
         # =========================================================================
-        # 5. IDEA STATUS DISTRIBUTION
+        # 5. IDEA STATUS DISTRIBUTION (Normalized)
         # =========================================================================
         status_counts = defaultdict(int)
         for idea in ideas:
             result = results_coll.find_one({"ideaId": str(idea["_id"])})
+            
+            # Determine raw outcome
             if result:
-                outcome = result.get("validationOutcome", "Pending")
+                raw_outcome = result.get("validationOutcome", "Pending")
             else:
-                outcome = idea.get("status", "Pending")
+                raw_outcome = idea.get("status", "Pending")
+            
+            # Normalize to Dashboard Categories
+            val = str(raw_outcome).upper()
+            if val == "APPROVED":
+                outcome = "Approved"
+            elif val == "MODERATE":
+                outcome = "Moderate"
+            elif val == "REJECTED":
+                outcome = "Rejected"
+            elif val == "SUBMITTED" or val == "PENDING":
+                outcome = "Pending"
+            else:
+                outcome = "Pending" # Default fallback for unknown statuses
+                
             status_counts[outcome] += 1
         
         status_distribution = [
@@ -254,12 +299,40 @@ def get_principal_stats():
                     total_score += result.get("overallScore", 0)
             avg_score = round(total_score / len(validated_ideas), 2) if validated_ideas else 0
         
+        # =========================================================================
+        # 10. REPORT USAGE
+        # =========================================================================
+        report_usage_pipeline = [
+            {
+                "$match": {
+                    "collegeId": college_id_str,
+                    "type": "PDF",
+                    "createdAt": {"$gte": start_of_month}
+                }
+            },
+            {
+                "$group": {
+                    "_id": "$ideaId"
+                }
+            },
+            {
+                "$count": "distinct_ideas"
+            }
+        ]
+        
+        report_usage_res = list(generated_reports_coll.aggregate(report_usage_pipeline))
+        reports_generated_month = report_usage_res[0]["distinct_ideas"] if report_usage_res else 0
+        
+        print(f"📊 Reports Generated This Month: {reports_generated_month}")
+
         statistics = {
             "ttcCount": ttc_count,
             "innovatorCount": innovator_count,
             "ideaCount": idea_count,
             "validatedIdeas": len(validated_ideas),
-            "averageScore": avg_score
+            "averageScore": avg_score,
+            "reportsGeneratedMonth": reports_generated_month,
+            "reportsLimit": 10
         }
         
         print("=" * 80)
@@ -275,7 +348,8 @@ def get_principal_stats():
                 "credits": {
                     "total": credits_total,
                     "used": credits_used,
-                    "available": credits_available
+                    "available": credits_available,
+                    "usedThisMonth": credits_used_this_month
                 },
                 "ttc": {
                     "used": ttc_count,

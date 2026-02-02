@@ -73,53 +73,80 @@ gunicorn "run:app"
 ## Project Structure
 
 ```
-pragati_server_v2/
-├── .flaskenv
-├── .gitignore
-├── requirements.txt
-├── run.py
-├── .vscode/
-├── app/
-│   ├── __init__.py
-│   ├── config.py
-│   ├── extensions.py
-│   ├── database/
-│   │   ├── __init__.py
-│   │   └── mongo.py
-│   ├── middleware/
-│   │   ├── __init__.py
-│   │   └── auth.py
-│   ├── routes/
-│   │   ├── __init__.py
-│   │   ├── admin.py
-│   │   ├── analytics.py
-│   │   ├── auth.py
-│   │   ├── coordinator.py
-│   │   ├── credits.py
-│   │   ├── ideas.py
-│   │   ├── mentors.py
-│   │   ├── notifications.py
-│   │   ├── principal.py
-│   │   ├── psychometric.py
-│   │   ├── reports_pdf.py
-│   │   ├── reports.py
-│   │   ├── search.py
-│   │   ├── teams.py
-│   │   └── users.py
-│   ├── services/
-│   │   ├── __init__.py
-│   │   ├── auth_service.py
-│   │   ├── email_service.py
-│   │   ├── notification_service.py
-│   │   ├── psychometric_service.py
-│   │   └── s3_service.py
-│   ├── templates/
-│   │   └── report_template.html
-│   └── utils/
-│       ├── __init__.py
-│       ├── id_helpers.py
-│       ├── token_utils.py
-│       └── validators.py
-├── tests/
-└── venv/
+D:\Projects\IT\pragati_server_v2\
+├───.dockerignore
+├───.flaskenv
+├───.gitignore
+├───automatedfixscript.py
+├───compose.yaml
+├───Dockerfile
+├───README.md
+├───requirements.txt
+├───run.py
+├───__pycache__\
+├───.git\...
+├───.vscode\
+├───app\
+│   ├───__init__.py
+│   ├───config.py
+│   ├───extensions.py
+│   ├───__pycache__\
+│   ├───database\
+│   │   ├───__init__.py
+│   │   ├───mongo.py
+│   │   └───__pycache__\
+│   ├───middleware\
+│   │   ├───__init__.py
+│   │   ├───auth.py
+│   │   └───__pycache__\
+│   ├───routes\
+│   │   ├───__init__.py
+│   │   ├───admin.py
+│   │   ├───analytics.py
+│   │   ├───audit.py
+│   │   ├───auth.py
+│   │   ├───coordinator.py
+│   │   ├───credits.py
+│   │   ├───dashboard.py
+│   │   ├───ideas.py
+│   │   ├───mentors.py
+│   │   ├───notifications.py
+│   │   ├───plans.py
+│   │   ├───principal.py
+│   │   ├───psychometric.py
+│   │   ├───reports_pdf.
+│   │   ├───reports.py
+│   │   ├───search.py
+│   │   ├───teams.py
+│   │   ├───users.py
+│   │   └───__pycache__\
+│   ├───services\
+│   │   ├───__init__.py
+│   │   ├───audit_service.py
+│   │   ├───auth_service.py
+│   │   ├───email_service.py
+│   │   ├───notification_service.py
+│   │   ├───pdf_generator_service.py
+│   │   ├───psychometric_service.py
+│   │   ├───s3_service.py
+│   │   └───__pycache__\
+│   ├───templates\
+│   │   ├───invitation_declined.html
+│   │   ├───invitation_error.html
+│   │   ├───invitation_success.html
+│   │   ├───report_template.html
+│   │   └───templates-pdf-template.html
+│   └───utils\
+│       ├───__init__.py
+│       ├───data_processors.py
+│       ├───id_helpers.py
+│       ├───token_utils.py
+│       ├───validators.py
+│       └───__pycache__\
+├───tests\
+└───venv\
+    ├───Include\...
+    ├───Lib\...
+    ├───Scripts\...
+    └───share\...
 ```
