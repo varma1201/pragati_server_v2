@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, jsonify
 from app.config import config
 from app.extensions import init_extensions
 from app.routes import register_blueprints
@@ -15,4 +15,8 @@ def create_app(config_name='default'):
     # Create database indexes
     create_indexes()
     
+    @app.route('/')
+    def home():
+        return jsonify({"message": "Welcome to Pragati Server"})
+
     return app
