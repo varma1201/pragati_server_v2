@@ -26,6 +26,7 @@ if __name__ == '__main__':
     print(f"  - Local: http://localhost:{port}")
     print(f"  - Network: http://{local_ip}:{port}")
     print("="*80)
+    print("Updated Version v2")
     
     app.run(
         host='0.0.0.0',  # Listen on all interfaces

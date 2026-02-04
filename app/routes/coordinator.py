@@ -122,20 +122,32 @@ def get_my_innovators():
     """Get innovators created by current TTC coordinator"""
     caller_id = request.user_id
     
-    # ✅ Add debug logging
-    print(f"Caller ID: {caller_id}")
-    print(f"Caller Role: {request.user_role}")
+    print("=" * 80)
+    print("👥 [GET INNOVATORS] Fetching innovators list")
+    print(f"   🆔 Raw Caller ID: {caller_id} (type: {type(caller_id)})")
     
-    cursor = users_coll.find(
-        {
-            "createdBy": caller_id,
-            "role": "innovator",
-            "isDeleted": {"$ne": True}
-        },
-        {"password": 0}
-    ).sort("createdAt", -1)
+    # ✅ FIX: Convert to ObjectId for DB query
+    if isinstance(caller_id, str):
+        try:
+            caller_id = ObjectId(caller_id)
+            print(f"   🔄 Converted Caller ID: {caller_id} (type: {type(caller_id)})")
+        except Exception as e:
+            print(f"   ❌ Failed to convert ID: {e}")
+            return jsonify({"error": "Invalid user ID format"}), 400
+            
+    # Debug the query
+    query = {
+        "createdBy": caller_id,
+        "role": "innovator",
+        "isDeleted": {"$ne": True}
+    }
+    print(f"   🔍 Query: {query}")
+    
+    cursor = users_coll.find(query, {"password": 0}).sort("createdAt", -1)
     
     innovators = [clean_doc(user) for user in cursor]
+    print(f"   ✅ Found {len(innovators)} innovators")
+    print("=" * 80)
     
     return jsonify({
         "success": True,

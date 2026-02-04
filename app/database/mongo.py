@@ -14,6 +14,12 @@ load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 APP_ID = os.getenv("PRAGATI_APP_ID", "pragati-innovation-suite")
 
+if MONGO_URI:
+    masked_uri = MONGO_URI.split('@')[1] if '@' in MONGO_URI else '...invalid-format...'
+    print(f"✅ [CONFIG] Loaded MONGO_URI pointing to: {masked_uri.split('/')[0]}")
+else:
+    print("❌ [CONFIG] MONGO_URI is missing!")
+
 # Validate MongoDB URI
 if not MONGO_URI:
     raise ValueError("MONGO_URI environment variable not set. Check your .env file.")

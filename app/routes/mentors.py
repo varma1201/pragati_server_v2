@@ -157,7 +157,7 @@ def request_mentor():
     print("✅ Notification created")
 
     AuditService.log_action(
-    actor_id=innovator_id,
+        actor_id=uid,
         action=f"Requested mentor: {mentor.get('name')}",
         category=AuditService.CATEGORY_CONSULTATION,
         target_id=request_id,

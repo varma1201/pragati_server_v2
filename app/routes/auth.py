@@ -62,17 +62,27 @@ def login():
     """Login endpoint for all user roles"""
     print("=" * 80)
     print("🔐 [LOGIN] Starting login process")
+    print(f"   🕒 Time: {datetime.now(timezone.utc)}")
     print("=" * 80)
     
     try:
-        body = request.get_json(force=True)
-        print(f"   📦 Request body received: {body}")
+        # Debug: Print raw data first
+        print(f"   📥 Raw request data: {request.data}")
         
+        try:
+            body = request.get_json(force=True)
+            print(f"   📦 JSON body parsed successfully")
+        except Exception as e:
+            print(f"   ❌ Failed to parse JSON: {e}")
+            return jsonify({"error": "Invalid JSON format"}), 400
+            
         email = body.get('email')
         pwd = body.get('password')
         
-        print(f"   📧 Email: {email}")
-        print(f"   🔑 Password length: {len(pwd) if pwd else 0}")
+        print(f"   📧 Email provided: '{email}'")
+        print(f"   🔑 Password provided: {'[PRESENT]' if pwd else '[MISSING]'}")
+        if pwd:
+            print(f"   🔑 Password length: {len(pwd)}")
         
         if not email or not pwd:
             print("   ❌ Missing email or password")
@@ -80,78 +90,93 @@ def login():
         
         print(f"   🔍 Searching for user with email: {email}")
         user = users_coll.find_one({"email": email})
+
+        print(f"   🔍 User found: {user}")
         
         if not user:
             print("   ❌ User not found in database")
+            # Debug: Check if there's any user with partial match or case sensitivity?
+            print("   🔍 Checking for case-insensitive match...")
+            regex_user = users_coll.find_one({"email": {"$regex": f"^{email}$", "$options": "i"}})
+            if regex_user:
+                print(f"   ⚠️ Found user with case difference: {regex_user['email']}")
+            else:
+                print("   ❌ No case-insensitive match found either")
             return jsonify({"error": "Invalid credentials"}), 401
         
-        print(f"   ✅ User found:")
-        print(f"      - ID: {user['_id']}")
-        print(f"      - Email: {user['email']}")
-        print(f"      - Role: {user['role']}")
-        print(f"      - Name: {user.get('name', 'N/A')}")
+        print(f"   ✅ User found: {user['_id']}")
+        print(f"      - Role: {user.get('role')}")
+        print(f"      - Active: {user.get('isActive')}")
+        
+        # Check active status
+        if user.get('isActive') is False:
+            print("   ❌ User account is inactive")
+            return jsonify({"error": "Account is inactive. Please contact support."}), 403
         
         print("   🔐 Initializing AuthService...")
         auth_service = AuthService(current_app.config['JWT_SECRET'])
         
+        stored_hash = user.get('password')
+        print(f"   🔑 Stored hash type: {type(stored_hash)}")
+        print(f"   🔑 Stored hash (preview): {str(stored_hash)[:10]}...")
+        
         print("   🔍 Verifying password...")
-        if not auth_service.verify_password(pwd, user['password']):
-            print("   ❌ Password verification failed")
+        is_valid = auth_service.verify_password(pwd, stored_hash)
+        
+        if not is_valid:
+            print("   ❌ Password verification FAILED")
+            print(f"   ❌ Provided password: '{pwd}'")
             return jsonify({"error": "Invalid credentials"}), 401
         
         print("   ✅ Password verified successfully")
         
         # ✅ Convert ObjectId to string BEFORE creating token
         user_id_str = str(user['_id'])
-        print(f"   📝 User ID (string): {user_id_str}")
         
         print("   🎫 Creating JWT token...")
-        token = auth_service.create_token(user_id_str, user['role'])
-        print(f"   ✅ Token created: {token[:20]}...")
+        try:
+            token = auth_service.create_token(user_id_str, user['role'])
+            print(f"   ✅ Token created successfully")
+        except Exception as e:
+            print(f"   ❌ Token creation failed: {e}")
+            raise e
         
-        print("   📦 Building user response object...")
+        print("   📦 Building response...")
         # ✅ Build user response with STRING uid (not ObjectId)
         user_dict = {
-            "uid": user_id_str,  # ✅ STRING, not ObjectId
+            "uid": user_id_str,
             "email": user['email'],
             "role": user['role'],
             "name": user.get('name', ''),
         }
         
-        print(f"   👤 User dict base: {user_dict}")
-        
         # Add role-specific fields
         if user['role'] == 'ttc_coordinator':
             college_id = user.get('collegeId')
             user_dict['collegeId'] = str(college_id) if college_id else None
-            print(f"   🏛️ TTC Coordinator - College ID: {user_dict['collegeId']}")
+            print(f"   🏛️ TTC Context: {user_dict['collegeId']}")
         
         if user['role'] == 'innovator':
             college_id = user.get('collegeId')
             ttc_id = user.get('ttcCoordinatorId')
             user_dict['collegeId'] = str(college_id) if college_id else None
             user_dict['ttcCoordinatorId'] = str(ttc_id) if ttc_id else None
-            print(f"   💡 Innovator - College ID: {user_dict['collegeId']}, TTC ID: {user_dict['ttcCoordinatorId']}")
         
         if user['role'] == 'college_admin':
             user_dict['collegeName'] = user.get('collegeName', '')
-            print(f"   🏫 College Admin - College Name: {user_dict['collegeName']}")
         
-        print("   📤 Preparing response...")
-        response = {
+        print("   ✅ Login successful - Sending response")
+        print("=" * 80)
+        
+        return jsonify({
             "token": token,
             "user": user_dict,
             "success": True
-        }
-        
-        print("   ✅ Login successful!")
-        print("=" * 80)
-        
-        return jsonify(response), 200
+        }), 200
         
     except Exception as e:
         print("=" * 80)
-        print("❌ [LOGIN ERROR] Exception occurred")
+        print("❌ [LOGIN ERROR] FATAL EXCEPTION")
         print("=" * 80)
         print(f"   Error type: {type(e).__name__}")
         print(f"   Error message: {str(e)}")
