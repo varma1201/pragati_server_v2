@@ -101,8 +101,50 @@ def get_report_by_idea_id(idea_id):
             
             elif caller_role == "college_admin":
                 caller_user = find_user(caller_id)
-                if caller_user and ids_match(caller_user.get("collegeId"), idea.get("collegeId")):
-                    authorized = True
+                if caller_user:
+                    user_college_id = caller_user.get("collegeId")
+                    idea_college_id = idea.get("collegeId")
+                    ttc_id = idea.get("ttcCoordinatorId")
+                    
+                    print(f"🕵️ DEBUG: Checking College Admin Access")
+                    print(f"   - Caller College: {user_college_id}")
+                    print(f"   - Idea College: {idea_college_id}")
+                    if ttc_id:
+                        print(f"   - Found TTC ID on Idea: {ttc_id}")
+                    else:
+                        print("   - No TTC ID on Idea, checking innovator...")
+                        innovator_id = idea.get("innovatorId")
+                        if innovator_id:
+                            innovator = find_user(innovator_id)
+                            if innovator:
+                                ttc_id = innovator.get("ttcCoordinatorId")
+                                print(f"   - Found TTC ID via Innovator: {ttc_id}")
+
+                                print(f"   - Found TTC ID via Innovator: {ttc_id}")
+
+
+                    # Check direct college match
+                    # LOGIC: The user IS the college (caller_id matches target collegeId)
+                    if ids_match(caller_id, idea_college_id):
+                        print(f"   ✅ MATCH: Caller ID {caller_id} matches Idea College ID")
+                        authorized = True
+                    
+                    # Check via TTC coordinator
+                    elif ttc_id:
+                        ttc_user = find_user(ttc_id)
+                        if ttc_user:
+                            ttc_college_id = ttc_user.get("collegeId")
+                            print(f"   - TTC User found. TTC College: {ttc_college_id}")
+                            
+                            if ids_match(caller_id, ttc_college_id):
+                                print(f"   ✅ MATCH: Via TTC coordinator college match (Caller {caller_id} IS the college)")
+                                authorized = True
+                            else:
+                                print(f"   ❌ MATCH FAILED: Caller {caller_id} != TTC college {ttc_college_id}")
+                        else:
+                            print(f"   ❌ TTC User not found for ID: {ttc_id}")
+                    else:
+                        print("   ❌ No direct connection and no TTC coordinator to check")
             
             elif caller_role == "mentor":
                 if ids_match(idea.get("consultationMentorId"), caller_id):
@@ -197,7 +239,29 @@ def get_idea_report(idea_id):
                 return jsonify({"error": "Access denied"}), 403
         elif caller_role == "college_admin":
             caller_user = find_user(caller_id)
-            if not caller_user or not ids_match(caller_user.get("collegeId"), idea.get("collegeId")):
+            authorized = False
+            if caller_user:
+                # Check direct college match
+                # Check direct match (Caller IS the college)
+                if ids_match(caller_id, idea.get("collegeId")):
+                    authorized = True
+                else:
+                    # Check via TTC Coordinator (Idea or Innovator)
+                    ttc_id = idea.get("ttcCoordinatorId")
+                    if not ttc_id:
+                         innovator = find_user(idea.get("innovatorId"))
+                         if innovator:
+                             ttc_id = innovator.get("ttcCoordinatorId")
+                    
+                    if ttc_id:
+                        ttc_user = find_user(ttc_id)
+                        if ttc_user:
+                            ttc_college = ttc_user.get("collegeId")
+                            # Check if Caller IS the college of the TTC
+                            if ids_match(caller_id, ttc_college):
+                                authorized = True
+            
+            if not authorized:
                 return jsonify({"error": "Access denied"}), 403
         
         # Read from 'results' collection (validation report)

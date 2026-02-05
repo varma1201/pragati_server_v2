@@ -673,9 +673,9 @@ def download_infographic_pdf(report_id):
         report = results_coll.find_one({"_id": oid})
         if not report: return jsonify({"error": "Report not found"}), 404
 
-        user_id = getattr(request, "userId", None)
-        user_role = getattr(request, "userRole", None)
-        if not ids_match(user_id, report.get("userId")) and user_role not in ["ttcCoordinator", "collegeAdmin", "superAdmin"]:
+        user_id = getattr(request, "user_id", None)
+        user_role = getattr(request, "user_role", None)
+        if not ids_match(user_id, report.get("userId")) and user_role not in ["ttc_coordinator", "college_admin", "super_admin"]:
             return jsonify({"error": "Unauthorized"}), 403
 
         # 2. Extract Data
