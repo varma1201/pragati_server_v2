@@ -43,6 +43,7 @@ users_coll = db["users"]
 # -------------------------------------------------------------------------
 ideas_coll = db["pragati-innovation-suite_ideas"]
 drafts_coll = db["pragati-innovation-suite_ideas_draft"]  # Draft ideas before submission
+idea_versions_coll = db["pragati-innovation-suite_idea_versions"]  # Versioned history of submitted ideas
 
 # -------------------------------------------------------------------------
 # Credit System Collections
@@ -175,6 +176,11 @@ def create_indexes():
         # Drafts collection indexes
         drafts_coll.create_index("userId")
         drafts_coll.create_index([("isDeleted", 1), ("userId", 1)])
+
+        # Idea Versions collection indexes
+        idea_versions_coll.create_index("rootIdeaId")
+        idea_versions_coll.create_index([("rootIdeaId", 1), ("version", -1)])
+        idea_versions_coll.create_index("previousVersionId")
         
         # Credit requests indexes
         credit_requests_coll.create_index([("to", 1), ("status", 1)])
@@ -259,6 +265,7 @@ def get_collection_stats():
         "users": users_coll.count_documents({}),
         "ideas": ideas_coll.count_documents({}),
         "drafts": drafts_coll.count_documents({}),
+        "idea_versions": idea_versions_coll.count_documents({}),
         "credit_requests": credit_requests_coll.count_documents({}),
         "psychometric_assessments": psychometric_assessments_coll.count_documents({}),
         "notifications": notifications_coll.count_documents({}),  # ✅ NEW

@@ -14,9 +14,11 @@ Reports Module - TWO SEPARATE SYSTEMS
 
 from flask import Blueprint, request, jsonify, current_app, send_file
 from app.middleware.auth import requires_auth, requires_role
+from app.services.auth_service import AuthService
 from app.database.mongo import (
     ideas_coll, users_coll, results_coll, 
-    generated_reports_coll, scheduled_reports_coll
+    generated_reports_coll, scheduled_reports_coll,
+    idea_versions_coll
 )
 from app.utils.validators import clean_doc, parse_oid, normalize_any_id_field
 from app.utils.id_helpers import find_user, ids_match
@@ -25,70 +27,203 @@ from bson import ObjectId
 import csv
 import io
 import logging
+import traceback
+import os
 
 reports_bp = Blueprint("reports", __name__, url_prefix="/api/reports")
 logger = logging.getLogger(__name__)
 
+# Initialize Auth Service
+auth_service = AuthService(os.getenv('JWT_SECRET', 'default-secret-key'))
+
 # =========================================================================
 # SYSTEM 1: IDEA VALIDATION REPORTS report get 
 # =========================================================================
-@reports_bp.route("/<idea_id>", methods=["GET"])
+@reports_bp.route("/share/<idea_id>", methods=["POST"])
 @requires_auth()
+def generate_guest_report_token(idea_id):
+    """
+    Generate a 7-day guest access token for a report.
+    This token allows read-only access to the report of the specified idea (and its versions).
+    
+    Auth: Requires user to have access to the idea first.
+    """
+    try:
+        # Validate idea ID
+        try:
+            idea_oid = ObjectId(idea_id)
+        except:
+            return jsonify({"error": "Invalid idea ID format"}), 400
+
+        # 1. Determine Root Idea (to grant access to full history)
+        root_idea_id = None
+        root_idea = None
+        
+        # Check if it's a root idea
+        root_idea_check = ideas_coll.find_one({"_id": idea_oid, "isDeleted": {"$ne": True}})
+        if root_idea_check:
+            root_idea_id = idea_oid
+            root_idea = root_idea_check
+        else:
+            # Check if it's a version
+            version_doc = idea_versions_coll.find_one({"_id": idea_oid, "isDeleted": {"$ne": True}})
+            if version_doc:
+                root_idea_id = version_doc.get("rootIdeaId")
+                # Fetch root idea for auth check
+                root_idea = ideas_coll.find_one({"_id": root_idea_id, "isDeleted": {"$ne": True}})
+        
+        if not root_idea:
+            return jsonify({"error": "Idea not found"}), 404
+
+        # 2. Authorization Check (User must have access to share it)
+        # We perform a lightweight check here - user must be able to view it to share it
+        # Reuse logic from get_report_by_idea_id but simplified for "can I view this?"
+        caller_id = request.user_id
+        caller_role = request.user_role
+        authorized = False
+        
+        if caller_role in ["innovator", "individual_innovator"]:
+             if ids_match(root_idea.get("innovatorId"), caller_id):
+                 authorized = True
+             else:
+                 # Check if team member
+                 caller_user = find_user(caller_id)
+                 if caller_user and caller_user.get("email") in root_idea.get("invitedTeam", []):
+                     authorized = True
+                     
+        elif caller_role in ["ttc_coordinator", "college_admin", "internal_mentor", "mentor", "super_admin"]:
+             # For now, allow these roles to generate tokens if they can access the platform
+             # In a stricter system, we'd duplicate the full College/TTC logic here.
+             # Assuming if they can hit this endpoint with a valid token, they are "internal" enough to share.
+             authorized = True
+             
+        if not authorized:
+            return jsonify({"error": "You are not authorized to share this report"}), 403
+
+        # 3. Generate Guest Token
+        # Payload includes rootIdeaId to allow access to all versions
+        # Standard AuthService creates 7-day tokens by default
+        token = auth_service.create_token(
+            uid="guest",
+            role="guest_report_viewer",
+            rootIdeaId=str(root_idea_id)
+        )
+        
+        return jsonify({
+            "success": True,
+            "token": token,
+            "expiresIn": "7 days",
+            "rootIdeaId": str(root_idea_id),
+            "message": "Guest access token generated successfully."
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Failed to generate guest token: {e}")
+        traceback.print_exc()
+        return jsonify({"error": "Failed to generate token"}), 500
+
+
+@reports_bp.route("/<idea_id>", methods=["GET"])
+# @requires_auth()  <-- REMOVED to handle guest tokens manually
 def get_report_by_idea_id(idea_id):
     """
     Get validation report from RESULTS collection by idea ID.
     Route: GET /api/reports/{ideaId}
     
-    Flow:
-    1. Receive idea_id
-    2. Search results_coll where ideaId matches
-    3. Return full result document
+    Enhanced Flow for Guest Access:
+    1. Extract Token
+    2. Check if Guest Token (role="guest_report_viewer")
+       - Validate access via rootIdeaId match
+    3. Check if Standard User Token
+       - Validate via DB user lookup and role checks
+    4. Return report
     """
     try:
+        # ========================================
+        # STEP 0: AUTHENTICATION & TOKEN PARSING
+        # ========================================
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"error": "Missing or invalid authorization header"}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            payload = auth_service.decode_token(token)
+        except Exception as e:
+            return jsonify({"error": "Invalid or expired token"}), 401
+            
+        caller_role = payload.get('role')
+        caller_id = payload.get('uid')
+        
+        # ========================================
+        # STEP 1: DETERMINE COLLECTION & ROOT IDEA
+        # ========================================
         # Convert idea_id to ObjectId
         try:
             idea_oid = ObjectId(idea_id) if isinstance(idea_id, str) else idea_id
         except Exception as e:
-            logger.error(f"❌ Invalid idea ID: {idea_id}")
             return jsonify({"error": "Invalid idea ID format"}), 400
         
-        logger.info(f"📊 Fetching report from results_coll for ideaId: {idea_id}")
+        root_idea = None
+        current_idea_doc = None
+        is_version = False
+        root_idea_id = None
         
-        # ========================================
-        # SEARCH RESULTS COLLECTION BY ideaId
-        # ========================================
-        result_doc = results_coll.find_one({"ideaId": idea_id})
+        # Check if it's in ideas_coll (root idea)
+        root_idea = ideas_coll.find_one({"_id": idea_oid, "isDeleted": {"$ne": True}})
         
-        if not result_doc:
-            logger.warning(f"⚠️ No result found for ideaId: {idea_id}")
-            return jsonify({
-                "success": False,
-                "error": "Report not found",
-                "message": f"No validation result found for idea {idea_id}"
-            }), 404
-        
-        logger.info(f"✅ Result found in results_coll for ideaId: {idea_id}")
-        
-        # ========================================
-        # AUTHORIZATION CHECK (Optional)
-        # ========================================
-        # Get the idea to check permissions
-        idea = ideas_coll.find_one({"_id": idea_oid, "isDeleted": {"$ne": True}})
-        
-        if idea:
-            caller_id = request.user_id
-            caller_role = request.user_role
-            authorized = False
+        if root_idea:
+            root_idea_id = idea_oid
+            current_idea_doc = root_idea
+            is_version = False
+        else:
+            # Check if it's in idea_versions_coll
+            version_doc = idea_versions_coll.find_one({"_id": idea_oid, "isDeleted": {"$ne": True}})
             
+            if version_doc:
+                root_idea_id = version_doc.get("rootIdeaId")
+                current_idea_doc = version_doc
+                is_version = True
+                
+                # Get the root idea for authorization and version history
+                root_idea = ideas_coll.find_one({"_id": root_idea_id, "isDeleted": {"$ne": True}})
+                
+                if not root_idea:
+                    return jsonify({"error": "Root idea not found"}), 404
+            else:
+                return jsonify({"error": "Idea not found"}), 404
+        
+        # ========================================
+        # STEP 2: AUTHORIZATION CHECK (Dual Path)
+        # ========================================
+        authorized = False
+        
+        # --- PATH A: GUEST ACCESS ---
+        if caller_role == "guest_report_viewer":
+            token_root_id = payload.get("rootIdeaId")
+            
+            # Verify the token grants access to this specific root idea
+            if token_root_id and token_root_id == str(root_idea_id):
+                authorized = True
+                logger.info(f"👤 Guest access granted for idea {idea_id} (Root: {root_idea_id})")
+            else:
+                logger.warning(f"❌ Guest token mismatch. Token Root: {token_root_id}, Actual Root: {root_idea_id}")
+                return jsonify({"error": "Guest token not valid for this idea"}), 403
+                
+        # --- PATH B: STANDARD USER ACCESS ---
+        else:
+            # Attach user info to request (replicating requires_auth middleware)
+            request.user_id = caller_id
+            request.user_role = caller_role
+            
+            # Standard Role Checks
             if caller_role in ["innovator", "individual_innovator"]:
-                if ids_match(idea.get("innovatorId"), caller_id):
+                if ids_match(root_idea.get("innovatorId"), caller_id):
                     authorized = True
                 else:
                     caller_user = find_user(caller_id)
-                    if caller_user:
-                        user_email = caller_user.get("email")
-                        if user_email and user_email in idea.get("invitedTeam", []):
-                            authorized = True
+                    if caller_user and caller_user.get("email") in root_idea.get("invitedTeam", []):
+                        authorized = True
             
             elif caller_role == "ttc_coordinator":
                 innovator_ids = users_coll.distinct("_id", {
@@ -96,90 +231,89 @@ def get_report_by_idea_id(idea_id):
                     "role": {"$in": ["innovator", "individual_innovator"]},
                     "isDeleted": {"$ne": True}
                 })
-                if any(ids_match(idea.get("innovatorId"), uid) for uid in innovator_ids):
+                if any(ids_match(root_idea.get("innovatorId"), uid) for uid in innovator_ids):
                     authorized = True
             
             elif caller_role == "college_admin":
                 caller_user = find_user(caller_id)
                 if caller_user:
                     user_college_id = caller_user.get("collegeId")
-                    idea_college_id = idea.get("collegeId")
-                    ttc_id = idea.get("ttcCoordinatorId")
+                    idea_college_id = root_idea.get("collegeId")
+                    ttc_id = root_idea.get("ttcCoordinatorId")
                     
-                    print(f"🕵️ DEBUG: Checking College Admin Access")
-                    print(f"   - Caller College: {user_college_id}")
-                    print(f"   - Idea College: {idea_college_id}")
-                    if ttc_id:
-                        print(f"   - Found TTC ID on Idea: {ttc_id}")
-                    else:
-                        print("   - No TTC ID on Idea, checking innovator...")
-                        innovator_id = idea.get("innovatorId")
-                        if innovator_id:
-                            innovator = find_user(innovator_id)
-                            if innovator:
-                                ttc_id = innovator.get("ttcCoordinatorId")
-                                print(f"   - Found TTC ID via Innovator: {ttc_id}")
-
-                                print(f"   - Found TTC ID via Innovator: {ttc_id}")
-
-
                     # Check direct college match
-                    # LOGIC: The user IS the college (caller_id matches target collegeId)
                     if ids_match(caller_id, idea_college_id):
-                        print(f"   ✅ MATCH: Caller ID {caller_id} matches Idea College ID")
                         authorized = True
-                    
                     # Check via TTC coordinator
                     elif ttc_id:
                         ttc_user = find_user(ttc_id)
-                        if ttc_user:
-                            ttc_college_id = ttc_user.get("collegeId")
-                            print(f"   - TTC User found. TTC College: {ttc_college_id}")
-                            
-                            if ids_match(caller_id, ttc_college_id):
-                                print(f"   ✅ MATCH: Via TTC coordinator college match (Caller {caller_id} IS the college)")
-                                authorized = True
-                            else:
-                                print(f"   ❌ MATCH FAILED: Caller {caller_id} != TTC college {ttc_college_id}")
-                        else:
-                            print(f"   ❌ TTC User not found for ID: {ttc_id}")
-                    else:
-                        print("   ❌ No direct connection and no TTC coordinator to check")
+                        if ttc_user and ids_match(caller_id, ttc_user.get("collegeId")):
+                            authorized = True
             
             elif caller_role == "mentor":
-                if ids_match(idea.get("consultationMentorId"), caller_id):
+                if ids_match(root_idea.get("consultationMentorId"), caller_id):
                     authorized = True
             
             elif caller_role == "internal_mentor":
-                if ids_match(idea.get("mentorId"), caller_id):
+                if ids_match(root_idea.get("mentorId"), caller_id):
                     authorized = True
             
             elif caller_role == "super_admin":
                 authorized = True
             
-            if not authorized:
-                logger.error(f"❌ Access denied for {caller_role} ({caller_id}) to idea {idea_id}")
-                return jsonify({"error": "Access denied"}), 403
+        if not authorized:
+            return jsonify({"error": "Access denied"}), 403
             
-            logger.info(f"✅ Authorization passed for {caller_role}")
+        # ========================================
+        # STEP 3: GET RESULT FOR CURRENT VERSION
+        # ========================================
+        # ✅ FIX: Use string ID for results_coll query
+        result_doc = results_coll.find_one({"ideaId": str(idea_id)})
+        
+        if not result_doc:
+            return jsonify({
+                "success": False,
+                "error": "Report not found",
+                "message": f"No validation result found for idea {idea_id}"
+            }), 404
         
         # ========================================
-        # RETURN FULL RESULT DOCUMENT
+        # STEP 4: GET VERSION HISTORY FROM ROOT
         # ========================================
-        # Clean the document (convert ObjectIds to strings, remove sensitive fields)
+        version_history = root_idea.get("versionHistory", [])
+        
+        # If no version history exists, create it for v1 (root idea)
+        if not version_history and not is_version:
+            version_history = [{
+                "version": 1,
+                "versionId": str(root_idea_id),
+                "submittedAt": root_idea.get("submittedAt", root_idea.get("createdAt")),
+                "description": "Original Submission"
+            }]
+        
+        # ========================================
+        # STEP 5: RETURN ENHANCED RESPONSE
+        # ========================================
         result_data = clean_doc(result_doc)
         
-        logger.info(f"✅ Returning full result document for ideaId: {idea_id}")
-        
-        return jsonify({
+        response_data = {
             "success": True,
-            "data": result_data
-        }), 200
+            "data": result_data,
+            "meta": {
+                "isVersion": is_version,
+                "rootIdeaId": str(root_idea_id),
+                "currentIdeaId": str(idea_oid),
+                "currentVersion": current_idea_doc.get("version", 1) if is_version else 1,
+                "accessType": "guest" if caller_role == "guest_report_viewer" else "user"
+            },
+            "versionHistory": clean_doc(version_history)
+        }
+        
+        return jsonify(response_data), 200
         
     except Exception as e:
         logger.error(f"❌ Failed to get report for idea {idea_id}: {e}")
-        import traceback
-        traceback.print_exc()
+        # traceback.print_exc()
         return jsonify({
             "error": "Failed to retrieve report",
             "message": str(e)

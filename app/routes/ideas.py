@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from app.middleware.auth import requires_role, requires_auth
-from app.database.mongo import ideas_coll, drafts_coll, users_coll, psychometric_assessments_coll, team_invitations_coll, consultation_requests_coll, results_coll
+from app.database.mongo import ideas_coll, drafts_coll, users_coll, psychometric_assessments_coll, team_invitations_coll, consultation_requests_coll, results_coll, idea_versions_coll
 from app.utils.validators import clean_doc, parse_oid, normalize_user_id, normalize_any_id_field
 from app.utils.id_helpers import find_user, ids_match
 from app.services.notification_service import NotificationService
@@ -2961,3 +2961,387 @@ def get_eligible_ideas_for_consultation():
             "error": "Failed to fetch eligible ideas",
             "message": str(e)
         }), 500
+
+
+@ideas_bp.route("/resubmit", methods=["POST"])
+@requires_role(["innovator", "individual_innovator"])
+def resubmit_idea():
+    """
+    Resubmit an idea with a new version.
+    1. Accepts original idea ID and new PPT/PDF.
+    2. Creates a new version in `idea_versions` collection.
+    3. Maintains lineage (rootIdeaId, previousVersionId).
+    4. Updates Root history and Linked List (nextVersionId).
+    """
+    print("=" * 80)
+    print("🚀 [resubmit_idea] Starting idea resubmission")
+    
+    uid = request.user_id
+    
+    # Check for file
+    if "pptFile" not in request.files:
+        return jsonify({"error": "pptFile required"}), 400
+        
+    file = request.files["pptFile"]
+    if file.filename == "":
+        return jsonify({"error": "No file selected"}), 400
+
+    # Validate filename
+    filename = secure_filename(file.filename)
+    if '.' not in filename:
+        return jsonify({"error": "Invalid filename"}), 400
+
+    ext = filename.rsplit(".", 1)[-1].lower()
+    if ext not in {"ppt", "pptx", "pdf"}:
+        return jsonify({"error": "Only .ppt, .pptx, or .pdf files allowed"}), 400
+
+    # Get Idea ID
+    idea_id_str = request.form.get("ideaId")
+    if not idea_id_str:
+        return jsonify({"error": "ideaId is required"}), 400
+        
+    try:
+        input_oid = ObjectId(idea_id_str)
+    except:
+        return jsonify({"error": "Invalid idea ID format"}), 400
+        
+    # LOGIC: Check if it's a Root Idea or a Version
+    # 1. Check in `ideas_coll` (Root)
+    root_idea = ideas_coll.find_one({
+        "_id": input_oid,
+        **normalize_any_id_field("innovatorId", uid)
+    })
+    
+    # 2. Check in `idea_versions_coll` (Version)
+    version_idea = None
+    if not root_idea:
+        version_idea = idea_versions_coll.find_one({
+            "_id": input_oid,
+            "createdBy": uid
+        })
+        
+    if not root_idea and not version_idea:
+        print(f"❌ Idea not found: {idea_id_str}")
+        return jsonify({"error": "Idea not found or access denied"}), 404
+        
+    # Determine Root ID and Next Version
+    if root_idea:
+        root_id = root_idea["_id"]
+        previous_version_id = root_idea["_id"] # Pointing to root as previous
+        
+        # Check if there are existing versions for this root
+        last_version = idea_versions_coll.find_one(
+            {"rootIdeaId": root_id},
+            sort=[("version", -1)]
+        )
+        version_number = (last_version["version"] + 1) if last_version else 2
+        ancestor_ids = [root_id]
+        if last_version:
+            previous_version_id = last_version["_id"]
+            ancestor_ids = last_version.get("ancestorIds", []) + [last_version["_id"]]
+
+    elif version_idea:
+        root_id = version_idea["rootIdeaId"]
+        previous_version_id = version_idea["_id"]
+        version_number = version_idea["version"] + 1
+        ancestor_ids = version_idea.get("ancestorIds", []) + [version_idea["_id"]]
+        
+        # Double check we are not branching from an old version
+        latest_version_doc = idea_versions_coll.find_one(
+            {"rootIdeaId": root_id},
+            sort=[("version", -1)]
+        )
+        if latest_version_doc and latest_version_doc["version"] >= version_number:
+             version_number = latest_version_doc["version"] + 1
+             previous_version_id = latest_version_doc["_id"]
+             ancestor_ids = latest_version_doc.get("ancestorIds", []) + [latest_version_doc["_id"]]
+
+    print(f"📊 Creating Version {version_number} for Root Idea {root_id}")
+
+    # Upload File
+    try:
+        unique_filename = f"v{version_number}-{uuid.uuid4()}-{filename}"
+        s3_key = f"ideas/{uid}/versions/{unique_filename}"
+        
+        print(f"📤 Uploading version file to S3: {s3_key}")
+        
+        # Get correct content type for each file format
+        content_type_map = {
+            'ppt': 'application/vnd.ms-powerpoint',
+            'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            'pdf': 'application/pdf'
+        }
+        content_type = content_type_map.get(ext, 'application/octet-stream')
+
+        s3.upload_fileobj(
+            file,
+            BUCKET,
+            s3_key,
+            ExtraArgs={'ContentType': content_type}
+        )
+        
+        # Create Version Document
+        new_version_id = ObjectId()
+        now = datetime.now(timezone.utc)
+        
+        version_doc = {
+            "_id": new_version_id,
+            "rootIdeaId": root_id,
+            "previousVersionId": previous_version_id,
+            "nextVersionId": None, # Latest version has no next
+            "version": version_number,
+            "ancestorIds": ancestor_ids,
+            
+            "pptFileKey": s3_key,
+            "pptFileName": filename,
+            "pptFileUrl": get_signed_url(s3_key), # Add file URL
+            "pptFileSize": file.content_length or 0,
+            
+            "createdAt": now,
+            "createdBy": uid,
+            
+            # Metadata
+            "isDeleted": False,
+            "description": request.form.get("description", ""), # Optional changelog
+        }
+        
+        idea_versions_coll.insert_one(version_doc)
+        print(f"✅ Created version {version_number} with ID: {new_version_id}")
+        
+        # =====================================================================
+        # UPDATE TRACKING LOGIC
+        # =====================================================================
+        
+        # 1. Update Parent (Root or Version) to point to this new version
+        if previous_version_id == root_id:
+            # Parent is Root
+            ideas_coll.update_one(
+                {"_id": root_id},
+                {"$set": {"nextVersionId": new_version_id}}
+            )
+        else:
+            # Parent is a Version
+            idea_versions_coll.update_one(
+                {"_id": previous_version_id},
+                {"$set": {"nextVersionId": new_version_id}}
+            )
+            
+        # 2. Update Root Idea History
+        # If this is the first version (v2), we might need to initialize history with v1
+        if version_number == 2:
+            # Check if history exists, if not init with v1
+            root_doc = ideas_coll.find_one({"_id": root_id})
+            if root_doc and "versionHistory" not in root_doc:
+                v1_entry = {
+                    "version": 1,
+                    "versionId": root_id,
+                    "submittedAt": root_doc.get("submittedAt", root_doc.get("createdAt")),
+                    "description": "Original Submission"
+                }
+                ideas_coll.update_one(
+                    {"_id": root_id},
+                    {"$set": {"versionHistory": [v1_entry]}}
+                )
+        
+        # Push new version to history and update latest
+        history_entry = {
+            "version": version_number,
+            "versionId": new_version_id,
+            "submittedAt": now,
+            "description": request.form.get("description", "")
+        }
+        
+        ideas_coll.update_one(
+            {"_id": root_id},
+            {
+                "$push": {"versionHistory": history_entry},
+                "$set": {"latestVersionId": new_version_id}
+            }
+        )
+        
+        return jsonify({
+            "success": True,
+            "message": f"Idea resubmitted successfully as Version {version_number}",
+            "data": {
+                "versionId": str(new_version_id),
+                "rootIdeaId": str(root_id),
+                "version": version_number,
+                "fileUrl": get_signed_url(s3_key)
+            }
+        }), 201
+
+    except Exception as e:
+        print(f"❌ Resubmission failed: {e}")
+        return jsonify({"error": "Failed to process resubmission"}), 500
+
+
+@ideas_bp.route("/resubmitted", methods=["GET"])
+@requires_role(["innovator", "individual_innovator", "super_admin"])
+def get_resubmitted_ideas():
+    """
+    Get all resubmitted ideas (versions).
+    - Innovators: See their own versions.
+    - Super Admin: See ALL versions in the system.
+    
+    Categorizes them into 'validated' and 'not_validated' based on
+    presence in the `results` collection.
+    Enriches with:
+    - Root Idea Title (appended with vN)
+    - Innovator Name & College Name (for admins)
+    - Submission Status
+    """
+    uid = request.user_id
+    role = request.user_role
+    
+    print("=" * 80)
+    print(f"🚀 [get_resubmitted_ideas] Fetching versions. User: {uid}, Role: {role}")
+    
+    try:
+        query = {"isDeleted": {"$ne": True}}
+        
+        # 1. Role-based Filtering
+        if role == "super_admin":
+            # Super Admin sees EVERYTHING
+            print(f"   👑 Super Admin mode - fetching all versions")
+            pass 
+            
+        else:
+            # Innovator / Individual Innovator
+            query["createdBy"] = uid
+
+        # 2. Fetch Versions
+        versions_cursor = idea_versions_coll.find(query).sort("createdAt", -1)
+        versions = list(versions_cursor)
+        print(f"📄 Found {len(versions)} versions")
+        
+        if not versions:
+            return jsonify({
+                "success": True,
+                "data": { "validated": [], "notValidated": [] }
+            }), 200
+
+        # 3. Data Enrichment Preparation
+        # Collections to bulk fetch
+        root_idea_ids = set()
+        creator_ids = set()
+        version_ids_str = []
+        
+        for v in versions:
+            root_idea_ids.add(v["rootIdeaId"])
+            creator_ids.add(v["createdBy"])
+            version_ids_str.append(str(v["_id"]))
+            
+        # Bulk Fetch: Validated Status (Results)
+        results_cursor = results_coll.find({
+            "ideaId": {"$in": version_ids_str}
+        }, {"ideaId": 1, "overallScore": 1, "_id": 1})
+        validated_map = {res["ideaId"]: res for res in results_cursor}
+        
+        # Bulk Fetch: Root Ideas (for Title, Status)
+        root_ideas_cursor = ideas_coll.find(
+            {"_id": {"$in": list(root_idea_ids)}},
+            {"title": 1, "status": 1, "innovatorId": 1}
+        )
+        root_map = {r["_id"]: r for r in root_ideas_cursor}
+        
+        # Bulk Fetch: Users (Innovators) - Only needed for Admin really, but good for consistency
+        users_cursor = users_coll.find(
+            {"_id": {"$in": list(creator_ids)}},
+            {"name": 1, "collegeId": 1}
+        )
+        user_map = {u["_id"]: u for u in users_cursor}
+        
+        # Bulk Fetch: Colleges (from Admin Users)
+        # Assuming innovator['collegeId'] points to the College Admin's _id
+        college_admin_ids = set()
+        for u in user_map.values():
+            cid = u.get("collegeId")
+            if cid:
+                # Handle possible ObjectId or String
+                try:
+                    if isinstance(cid, str):
+                        college_admin_ids.add(ObjectId(cid))
+                    else:
+                        college_admin_ids.add(cid)
+                except:
+                    pass
+                    
+        college_map = {}
+        if college_admin_ids:
+            college_admins_cursor = users_coll.find(
+                {"_id": {"$in": list(college_admin_ids)}},
+                {"collegeName": 1}
+            )
+            # Map College Admin ID -> College Admin Name (College Name)
+            college_map = {c["_id"]: c.get("collegeName", "Unknown College") for c in college_admins_cursor}
+        
+        # 4. Categorize & Format
+        validated_list = []
+        not_validated_list = []
+        
+        for v in versions:
+            v_id_str = str(v["_id"])
+            root_doc = root_map.get(v["rootIdeaId"])
+            creator = user_map.get(v["createdBy"])
+            
+            # Resolve College Name
+            college_name = "Unknown"
+            cid_raw = creator.get("collegeId") if creator else None
+            cid_oid = None
+            if cid_raw:
+                try:
+                    cid_oid = ObjectId(cid_raw) if isinstance(cid_raw, str) else cid_raw
+                except:
+                    pass
+            
+            if cid_oid and cid_oid in college_map:
+                college_name = college_map[cid_oid]
+            
+            # Base Data
+            base_title = root_doc.get("title", "Untitled") if root_doc else "Untitled"
+            title_with_version = f"{base_title} v{v['version']}"
+            
+            version_data = {
+                "versionId": v_id_str,
+                "rootIdeaId": str(v["rootIdeaId"]),
+                "version": v["version"],
+                "title": title_with_version, # ✅ Title vN
+                "rootStatus": root_doc.get("status", "unknown") if root_doc else "unknown",
+                
+                "innovatorName": creator.get("name", "Unknown") if creator else "Unknown",
+                "innovatorId": str(v["createdBy"]),
+                "collegeId": str(cid_raw) if cid_raw else None,
+                "collegeName": college_name, # ✅ Resolved College Name
+                
+                "pptFileName": v.get("pptFileName"),
+                "pptFileUrl": get_signed_url(v.get("pptFileKey")),
+                "createdAt": v["createdAt"].isoformat(),
+                "description": v.get("description", "")
+            }
+            
+            # Add Validation Data
+            if v_id_str in validated_map:
+                result_data = validated_map[v_id_str]
+                version_data["overallScore"] = result_data.get("overallScore")
+                version_data["resultId"] = str(result_data["_id"])
+                validated_list.append(version_data)
+            else:
+                not_validated_list.append(version_data)
+                
+        return jsonify({
+            "success": True,
+            "data": {
+                "validated": validated_list,
+                "notValidated": not_validated_list,
+                "counts": {
+                    "validated": len(validated_list),
+                    "notValidated": len(not_validated_list)
+                }
+            }
+        }), 200
+
+    except Exception as e:
+        print(f"❌ Failed to fetch resubmitted ideas: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "Failed to fetch resubmitted ideas"}), 500
