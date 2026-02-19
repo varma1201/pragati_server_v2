@@ -127,6 +127,11 @@ otp_coll = db["otp_codes"]  # ✅ FIX BUG #3
 
 consultation_requests_coll = db['consultation_requests']
 
+#--------------------------------------------------------------------------
+# Payment Transactions
+#--------------------------------------------------------------------------
+payment_transactions_coll = db['payment_transactions']
+
 evaluations_coll = db['user_profiles']
 
 mentor_evaluations_coll = db['mentor_profiles']
@@ -245,6 +250,12 @@ def create_indexes():
         # ✅ NEW: Mentor profiles indexes
         mentor_evaluations_coll.create_index([("userId", 1), ("status", 1)])
         mentor_evaluations_coll.create_index([("userId", 1), ("createdAt", -1)])
+
+        # ✅ NEW: Payment transactions indexes
+        payment_transactions_coll.create_index([("userId", 1), ("createdAt", -1)])
+        payment_transactions_coll.create_index([("status", 1)])
+        payment_transactions_coll.create_index([("zohoSessionId", 1)], unique=True)
+        payment_transactions_coll.create_index([("invoiceNumber", 1)])
         
         print("✅ Database indexes created successfully")
         
