@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 import traceback
 import logging
+import requests
 
 from app.database.mongo import db, users_coll, mentor_evaluations_coll
 from app.middleware.auth import requires_role, requires_auth
@@ -26,6 +27,83 @@ psychometric_bp = Blueprint('psychometric', __name__, url_prefix='/api/psychomet
 assessments_coll = db.psychometric_assessments
 evaluations_coll = db.psychometric_evaluations
 profiles_coll = db.user_profiles
+
+# =========================================================================
+# PROXY ROUTES: PSYCHOMETRIC SERVER
+# =========================================================================
+
+@psychometric_bp.route('/generate', methods=['POST'])
+@requires_auth()
+def proxy_generate_assessment():
+    """
+    Proxy request to generate a psychometric assessment.
+    """
+    from app.config import get_config
+    config = get_config()
+    
+    psycho_url = config.PSYCHOMETRIC_SERVER_URL
+    if not psycho_url:
+        return jsonify({"error": "Psychometric Server URL is not configured"}), 500
+        
+    target_url = f"{psycho_url}/api/psychometric/generate"
+    
+    try:
+        payload = request.get_json()
+        
+        # Forward Authorization header
+        auth_header = request.headers.get("Authorization")
+        headers = {}
+        if auth_header:
+            headers["Authorization"] = auth_header
+            
+        print(f"🚀 Proxying generate assessment to: {target_url}")
+        response = requests.post(target_url, json=payload, headers=headers, timeout=60)
+        
+        try:
+            return jsonify(response.json()), response.status_code
+        except ValueError:
+            return response.content, response.status_code
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Proxy request failed: {str(e)}")
+        return jsonify({"error": "Failed to communicate with Psychometric Server", "details": str(e)}), 502
+
+
+@psychometric_bp.route('/evaluate', methods=['POST'])
+@requires_auth()
+def proxy_evaluate_assessment():
+    """
+    Proxy request to evaluate psychometric answers.
+    """
+    from app.config import get_config
+    config = get_config()
+    
+    psycho_url = config.PSYCHOMETRIC_SERVER_URL
+    if not psycho_url:
+        return jsonify({"error": "Psychometric Server URL is not configured"}), 500
+        
+    target_url = f"{psycho_url}/api/psychometric/evaluate"
+    
+    try:
+        payload = request.get_json()
+        
+        # Forward Authorization header
+        auth_header = request.headers.get("Authorization")
+        headers = {}
+        if auth_header:
+            headers["Authorization"] = auth_header
+            
+        print(f"🚀 Proxying evaluate assessment to: {target_url}")
+        response = requests.post(target_url, json=payload, headers=headers, timeout=120)
+        
+        try:
+            return jsonify(response.json()), response.status_code
+        except ValueError:
+            return response.content, response.status_code
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Proxy request failed: {str(e)}")
+        return jsonify({"error": "Failed to communicate with Psychometric Server", "details": str(e)}), 502
 
 
 # =========================================================================

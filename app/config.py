@@ -7,7 +7,7 @@ import os
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+load_dotenv(override=True)
 
 
 class Config:
@@ -45,8 +45,11 @@ class Config:
         "team_member"
     ]
     
+    # AI Server URL (for 109 agent cluster)
+    AI_SERVER_URL = os.getenv("AI_SERVER_URL", "http://localhost:5001")
+    
     # Psychometric Server URL (for external API calls)
-    PSYCHOMETRIC_SERVER_URL = os.getenv("PSYCHOMETRIC_SERVER_URL", "http://localhost:5001")
+    PSYCHOMETRIC_SERVER_URL = os.getenv("PSYCHOMETRIC_SERVER_URL", "http://localhost:8002")
     
     # Rate Limiting (if needed)
     RATELIMIT_ENABLED = os.getenv("RATELIMIT_ENABLED", "False").lower() == "true"

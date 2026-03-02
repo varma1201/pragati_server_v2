@@ -13,6 +13,7 @@ from werkzeug.utils import secure_filename
 import mimetypes
 from bson import ObjectId
 from app.services.audit_service import AuditService
+import requests
 
 
 ideas_bp = Blueprint('ideas', __name__, url_prefix='/api/ideas')
@@ -329,6 +330,54 @@ def upsert_draft():
     print(f"✅ Returning success with draftId: {out_id}")
     print("=" * 80)
     return jsonify(response_data), 200
+
+# =========================================================================
+# PROXY ROUTE: AI SERVER
+# =========================================================================
+
+@ideas_bp.route("/validate-pitch-decks-batch", methods=["POST"])
+@requires_auth()
+@requires_role(["super_admin", "admin", "college_admin", "ttc_coordinator"])
+def proxy_validate_pitch_decks_batch():
+    """
+    Proxy request to the external AI Server for batch validation.
+    """
+    from app.config import get_config
+    config = get_config()
+    
+    ai_server_url = config.AI_SERVER_URL
+    if not ai_server_url:
+        return jsonify({"error": "AI Server URL is not configured"}), 500
+        
+    target_url = f"{ai_server_url}/api/validate-pitch-decks-batch"
+    
+    try:
+        # Forward the JSON body exactly as received
+        payload = request.get_json()
+        
+        # Forward Authorization header
+        auth_header = request.headers.get("Authorization")
+        headers = {}
+        if auth_header:
+            headers["Authorization"] = auth_header
+            
+        print(f"🚀 Proxying batch validation to AI server: {target_url}")
+        
+        # Make the request to the AI server
+        response = requests.post(target_url, json=payload, headers=headers, timeout=300) # 5 min timeout for batch Processing
+        
+        # Return the response exactly as received from the AI server
+        try:
+            return jsonify(response.json()), response.status_code
+        except ValueError:
+            return response.content, response.status_code
+            
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Proxy request failed: {str(e)}")
+        return jsonify({
+            "error": "Failed to communicate with AI Server",
+            "details": str(e)
+        }), 502
 
 
 @ideas_bp.route('/draft/my-latest', methods=['GET'])
